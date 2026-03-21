@@ -56,7 +56,7 @@ std::vector<CointegratedPair> run_cpp_scan(
     MarketData market_data(num_stocks, num_days);
     for (int i = 0; i < num_stocks; ++i) {
         for (int j = 0; j < num_days; ++j){
-            market_data.set_price(i, j, price_matrix[i][j])
+            market_data.set_price(i, j, price_matrix[i][j]);
         }
     }
 
@@ -77,10 +77,10 @@ std::vector<CointegratedPair> run_cpp_scan(
         const double* stock_x = market_data.get_stock_data(pair.stock_a_idx);
         const double* stock_y = market_data.get_stock_data(pair.stock_b_idx);
 
-        OLSResult old = MathStats::calculate_OLS(stock_x, stock_y, num_days)
+        OLSResult ols = MathStats::calculate_OLS(stock_x, stock_y, num_days)
         Eigen::VectorXd spread = MathStats::calculate_spread(stock_x, stock_y, num_days, ols.alpha, ols.beta);
 
-        double adf_stat = MathStats::calculate_adf_statistics(spread);
+        double adf_stat = MathStats::calculate_adf_statistic(spread);
         // run at it adf, only pairs follows stationary spread (meaning the spread between two stocks will always follow a certain mean)
         // will be counted for further examination.
         // if adf < -3.0 it means theres very little chance that the spread is random and there's a big chance it follows 
@@ -91,7 +91,7 @@ std::vector<CointegratedPair> run_cpp_scan(
             result.stock_y = tickers[pair.stock_b_idx];
             result.correlation = pair.correlation;
             result.hedge_ratio = ols.beta;
-            results.adf_stat = adf_stat;
+            result.adf_stat = adf_stat;
 
             final_results.push_back(result);
         }
@@ -113,7 +113,7 @@ PYBIND11_MODULE(cointegration_engine, m) {
         .def_readonly("stock_y", &CointegratedPair::stock_y)
         .def_readonly("correlation", &CointegratedPair::correlation)
         .def_readonly("hedge_ratio", &CointegratedPair::hedge_ratio)
-        .def_readonly("adf_stat", &CointegratedPair::adf_stat)
+        .def_readonly("adf_stat", &CointegratedPair::adf_stat);
     // binding runn_cpp_scan to allow python run it 
         m.def("run_cpp_scan", &run_cpp_scan, "Scan for cointegrated pairs",
             py::arg("tickers"),
