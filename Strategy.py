@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import pandas as pd
+from typing import Dict, List, Any
 
 
 class BaseStrategy(ABC):
@@ -8,7 +9,7 @@ class BaseStrategy(ABC):
         self.weight_allocation = weight_allocation
 
     @abstractmethod
-    async def generate_signals(self, market_data: pd.dataFrame) -> list[dict]:
+    async def generate_signals(self, market_data: pd.dataFrame, current_positions: Dict[str, Any]) -> List[dict]:
         pass
 
 

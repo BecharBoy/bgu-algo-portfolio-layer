@@ -6,21 +6,22 @@ class IB_Connect:
         self.host = host
         self.port = port
         self.client_id = client_id
+        self.ib = IB()
 
-    def connect(self):
+    async def connect(self):
         pass
 
     def disconnect(self):
         pass
 
-
-    def get_account_summary(self):
+    async def get_account_summary(self) -> dict:
         pass
 
-
-    def get_positions(self):
+    async def get_positions(self) -> dict:
         pass
 
-    def place_order(self, action, symbol, quantity, order_type):
+    async def place_market_order(self, action: str, symbol: str, quantity: int):
         pass
 
+    async def place_bracket_order(self, action: str, symbol: str, quantity: int, take_profit: float, stop_loss: float):
+        pass
