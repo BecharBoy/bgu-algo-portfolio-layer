@@ -7,81 +7,107 @@ from Strategy import BaseStrategy
 class MeanReversionMomentum(BaseStrategy):
     def __init__(self, name: str = "MeanReversionMomentum", weight_allocation: float = 0.5):
         super().__init__(name, weight_allocation)
-        # שומרים כאן פרמטרים של האלגוריתם בלבד, לא שומרים DataFrames או מילונים של אינדיקטורים
         self.sma_window = 30
         self.rsi_period = 14
         self.atr_period = 14
+        # TODO: Add explicit entry and exit threshold parameters.
+        # TODO: Add anti-lookahead policy (generate on close, execute next session).
 
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        פעולה וקטורית על ה-DataFrame שסופק מבחוץ.
-        מניח שה-DataFrame מכיל עמודות: Open, High, Low, Close, Volume
-        """
-        # עותק כדי לא לזהם את הנתונים המקוריים שמועברים אולי לאסטרטגיות אחרות
+        # TODO: Validate required columns: Open, High, Low, Close, Volume.
+        # TODO: Consider caching indicator windows for larger universes.
         data = df.copy()
 
-        data['SMA'] = data['Close'].rolling(window=self.sma_window).mean()
-        data['Upper_BB'] = data['SMA'] + 2 * data['Close'].rolling(self.sma_window).std()
-        data['Lower_BB'] = data['SMA'] - 2 * data['Close'].rolling(self.sma_window).std()
+        data["SMA"] = data["Close"].rolling(window=self.sma_window).mean()
+        data["Upper_BB"] = data["SMA"] + 2 * data["Close"].rolling(self.sma_window).std()
+        data["Lower_BB"] = data["SMA"] - 2 * data["Close"].rolling(self.sma_window).std()
 
-        data['RSI'] = ta.RSI(data['Close'].values, timeperiod=self.rsi_period)
-        data['ATR'] = ta.ATR(data['High'].values, data['Low'].values, data['Close'].values, timeperiod=self.atr_period)
+        data["RSI"] = ta.RSI(data["Close"].values, timeperiod=self.rsi_period)
+        data["ATR"] = ta.ATR(
+            data["High"].values,
+            data["Low"].values,
+            data["Close"].values,
+            timeperiod=self.atr_period,
+        )
 
-        macd, macdsignal, macdhist = ta.MACD(data['Close'].values, fastperiod=24, slowperiod=52, signalperiod=18)
-        data['MACD_Line'] = macd
-        data['MACD_Signal'] = macdsignal
+        macd, macd_signal, _ = ta.MACD(
+            data["Close"].values,
+            fastperiod=24,
+            slowperiod=52,
+            signalperiod=18,
+        )
+        data["MACD_Line"] = macd
+        data["MACD_Signal"] = macd_signal
 
         return data
 
-    async def generate_signals(self, market_data: Dict[str, pd.DataFrame], current_positions: Dict[str, Any]) -> List[
-        Dict]:
-        """
-        הפונקציה המרכזית שנקראת על ידי ה-Portfolio.
-        market_data: מילון של טיקרים וה-DataFrame ההיסטורי שלהם.
-        """
-        signals = []
+    async def generate_signals(
+        self,
+        market_data: Dict[str, pd.DataFrame],
+        current_positions: Dict[str, Any],
+    ) -> List[Dict]:
+        # TODO: Add per-ticker exception isolation to keep the batch resilient.
+        # TODO: Return one shared signal schema with timestamp and signal_id.
+        signals: List[Dict[str, Any]] = []
 
         for ticker, df in market_data.items():
-            if df.empty or len(df) < 52:  # מוודא שיש מספיק נתונים לחישוב MACD איטי
+            if df.empty or len(df) < 52:
                 continue
 
             df_with_ind = self._calculate_indicators(df)
-            current_price = df_with_ind['Close'].iloc[-1]
+            current_price = df_with_ind["Close"].iloc[-1]
 
-            # בדיקה האם יש פוזיציה פתוחה בנכס הזה
             if ticker in current_positions:
-                pos_data = current_positions[ticker]
-                if self._get_sell_signal(df_with_ind, pos_data, current_price):
-                    signals.append({
-                        'symbol': ticker,
-                        'action': 'SELL',
-                        'strategy': self.name,
-                        'price_reference': current_price
-                    })
+                position_data = current_positions[ticker]
+                if self._get_sell_signal(df_with_ind, position_data, current_price):
+                    signals.append(
+                        self._build_signal(
+                            symbol=ticker,
+                            action="SELL",
+                            current_price=current_price,
+                            reason="exit_rule_triggered",
+                        )
+                    )
             else:
                 if self._get_buy_signal(df_with_ind, current_price):
-                    signals.append({
-                        'symbol': ticker,
-                        'action': 'BUY',
-                        'strategy': self.name,
-                        'price_reference': current_price
-                    })
+                    signals.append(
+                        self._build_signal(
+                            symbol=ticker,
+                            action="BUY",
+                            current_price=current_price,
+                            reason="entry_rule_triggered",
+                        )
+                    )
 
         return signals
 
     def _get_buy_signal(self, df: pd.DataFrame, current_price: float) -> bool:
-        """לוגיקת כניסה לעסקה לפי שורת הנתונים האחרונה"""
+        # TODO: Replace placeholder crossover logic with full mean reversion criteria.
+        # TODO: Use RSI, ATR, Bollinger, and trend filter consistently.
         last_row = df.iloc[-1]
         prev_row = df.iloc[-2]
 
-        # ... כאן תכנס לוגיקת ה-Bullish/Bearish, MACD, Bollinger וה-ATR שהייתה בקוד הישן שלך ...
-        # דוגמה חלקית:
-        if last_row['MACD_Line'] >= last_row['MACD_Signal'] and prev_row['MACD_Line'] <= prev_row['MACD_Signal']:
+        if last_row["MACD_Line"] >= last_row["MACD_Signal"] and prev_row["MACD_Line"] <= prev_row["MACD_Signal"]:
             return True
 
         return False
 
-    def _get_sell_signal(self, df: pd.DataFrame, pos_data: dict, current_price: float) -> bool:
-        """לוגיקת יציאה מעסקה, כולל בדיקת Stop Loss / Take Profit ומומנטום דועך"""
-        # ... לוגיקת המכירה ...
+    def _get_sell_signal(self, df: pd.DataFrame, pos_data: Dict[str, Any], current_price: float) -> bool:
+        # TODO: Implement exit logic (target, stop, time stop, momentum decay).
+        # TODO: Define partial vs full exit behavior.
+        pass
+
+    def _build_signal(self, symbol: str, action: str, current_price: float, reason: str) -> Dict[str, Any]:
+        # TODO: Add stable signal_id and timestamp.
+        # TODO: Include indicator snapshot for diagnostics.
+        return {
+            "symbol": symbol,
+            "action": action,
+            "strategy": self.name,
+            "price_reference": current_price,
+            "reason": reason,
+        }
+
+    def _validate_indicator_row(self, row: pd.Series) -> bool:
+        # TODO: Validate NaNs and malformed final rows before decision logic.
         pass
