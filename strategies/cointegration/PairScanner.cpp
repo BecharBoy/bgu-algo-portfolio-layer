@@ -27,6 +27,8 @@ void PairScanner::worker_task(const MarketData &data, int start_row, int end_row
 }
 
 std::vector<PairResult> PairScanner::scan_all_pairs(const MarketData &data, int num_threads, double min_correlation) {
+    // TODO: Clear previous run state so results do not accumulate across calls.
+    // TODO: Validate num_threads > 0 before division.
     std::vector<std::thread> threads;
     int num_stocks = data.get_num_stocks();
 
@@ -46,6 +48,7 @@ std::vector<PairResult> PairScanner::scan_all_pairs(const MarketData &data, int 
 
         // if we get to the working target but we got more process to make (except the last one)
         if (current_work >= target_work && threads.size() < num_threads - 1) {
+            // TODO: Revisit row split boundaries to avoid skipping/duplicating work.
             int end_row = i - 1;
             threads.push_back(std::thread(&PairScanner::worker_task, this, std::ref(data),
                 current_start, end_row, min_correlation));            ;
@@ -54,7 +57,9 @@ std::vector<PairResult> PairScanner::scan_all_pairs(const MarketData &data, int 
             current_work = 0;
         }
     }
+        // TODO: Consider replacing manual thread management with a thread pool.
         threads.push_back(std::thread(&PairScanner::worker_task, this, std::ref(data), current_start, num_stocks, min_correlation));    for (int i = 0; i < num_threads; ++i) {
+        // TODO: Join using threads.size() instead of num_threads for safety.
         threads[i].join();
     }
     return top_pairs;

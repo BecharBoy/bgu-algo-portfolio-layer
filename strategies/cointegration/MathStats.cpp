@@ -4,6 +4,7 @@
 #include <Eigen/Dense>
 
 double MathStats::calculate_correlation(const double *stock_a, const double *stock_b, int num_days) {
+        // TODO: Guard zero-variance vectors to avoid divide-by-zero.
         Eigen::Map<const Eigen::VectorXd> vA(stock_a, num_days);
         Eigen::Map<const Eigen::VectorXd> vB(stock_b, num_days);
 
@@ -15,6 +16,7 @@ double MathStats::calculate_correlation(const double *stock_a, const double *sto
 }
 
 OLSResult MathStats::calculate_OLS(const double *stock_x, const double *stock_y, int num_days) {
+        // TODO: Guard zero variance in X to avoid invalid beta values.
         Eigen::Map<const Eigen::VectorXd> vX(stock_x, num_days);
         Eigen::Map<const Eigen::VectorXd> vY(stock_y, num_days);
 
@@ -41,6 +43,7 @@ Eigen::VectorXd MathStats::calculate_spread(const double *stock_x, const double 
 }
 
 double MathStats::calculate_adf_statistic(const Eigen::VectorXd& spread) {
+        // TODO: Validate sample size assumptions against production lookback.
         int n = spread.size() - 1;
         if (n <= 2) return 0.0;
 
