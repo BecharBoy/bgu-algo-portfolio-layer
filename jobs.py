@@ -2,8 +2,13 @@ from DataFeed import DataFeed
 from Portfolio import Portfolio
 
 
-async def bootstrap_history_job(data_feed: DataFeed) -> None:
+async def bootstrap_history_job(data_feed: DataFeed, db: DB) -> None:
+    already_done = await db.get_system_flag("bootstrap_done")
+    if already_done == "true":
+        logging.info("bootstrap_history_job: history already bootstrapped, skipping.")
+        return
     await data_feed.bootstrap_two_year_history()
+    await db.set_system_flag("bootstrap_done", "true")
 
 
 async def daily_incremental_update_job(data_feed: DataFeed) -> None:
