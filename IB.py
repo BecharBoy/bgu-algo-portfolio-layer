@@ -1,53 +1,76 @@
-
-
-
-try:
-    from ib_insync import IB  # type: ignore
-except ImportError:  # pragma: no cover - dependency may not be installed yet
-    IB = None
-
+import asyncio
+from ib_async import IB, Stock, MarketOrder
 
 class IB_Connect:
-    def __init__(self, host, port, client_id):
+    def __init__(self, host: str, port: int, client_id: int):
         self.host = host
         self.port = port
         self.client_id = client_id
-        # TODO: Raise clear setup error if ib_insync is missing.
-        self.ib = IB() if IB is not None else None
+        self.ib = IB()
 
-    async def connect(self):
-        # TODO: Implement async connection with retry/backoff.
-        # TODO: Verify connection state and account permissions.
-        pass
+    async def connect(self) -> None:
+        await self.ib.connectAsync(self.host, self.port, clientId=self.client_id)
 
-    def disconnect(self):
-        # TODO: Implement graceful disconnect and cleanup.
-        pass
+    def disconnect(self) -> None:
+        if self.ib.isConnected():
+            self.ib.disconnect()
+
+    async def reconnect_if_needed(self) -> None:
+        if not self.ib.isConnected():
+            await self.connect()
 
     async def get_account_summary(self) -> dict:
-        # TODO: Map IB account summary fields into internal account schema.
-        pass
+        account_values = await self.ib.reqAccountSummaryAsync()
+        result = {}
+        for av in account_values:
+            if av.tag == "NetLiquidation":
+                result["nlv"] = float(av.value)
+            elif av.tag == "TotalCashValue":
+                result["cash"] = float(av.value)
+        if "nlv" not in result or "cash" not in result:
+            raise RuntimeError(f"Incomplete account summary from TWS: {result}")
+        return result
 
     async def get_positions(self) -> dict:
-        # TODO: Normalize IB positions into symbol-keyed dictionary.
-        pass
+        positions = await self.ib.reqPositionsAsync()
+        return {
+            pos.contract.symbol: {
+                "quantity": pos.position,
+                "avg_cost": pos.avgCost,
+            }
+            for pos in positions
+            if pos.position != 0
+        }
 
-    async def place_market_order(self, action: str, symbol: str, quantity: int):
-        # TODO: Place market order and return order_id + status metadata.
-        pass
-
-    async def place_bracket_order(self, action: str, symbol: str, quantity: int, take_profit: float, stop_loss: float):
-        # TODO: Place parent/TP/SL bracket and return linked order ids.
-        pass
-
-    async def reconnect_if_needed(self):
-        # TODO: Health-check connection and auto-reconnect if dropped.
-        pass
-
-    async def get_open_orders(self) -> list[dict]:
-        # TODO: Fetch and normalize open orders for reconciliation.
-        pass
+    async def place_market_order(self, action: str, symbol: str, quantity: int) -> dict:
+        contract = Stock(symbol, "SMART", "USD")
+        await self.ib.qualifyContractsAsync(contract)
+        order = MarketOrder(action, quantity)
+        trade = self.ib.placeOrder(contract, order)
+        return {"order_id": trade.order.orderId, "status": trade.orderStatus.status}
 
     async def wait_for_order_updates(self, timeout_seconds: int = 15) -> list[dict]:
-        # TODO: Poll/subscribe to order status updates until timeout.
-        pass
+        await asyncio.sleep(timeout_seconds)
+        return [
+            {
+                "order_id":   f.execution.orderId,
+                "symbol":     f.contract.symbol,
+                "quantity":   f.execution.shares,
+                "fill_price": f.execution.price,
+                "filled_at":  f.execution.time,
+            }
+            for f in self.ib.fills()
+        ]
+
+    async def get_open_orders(self) -> list[dict]:
+        trades = await self.ib.reqOpenOrdersAsync()
+        return [
+            {
+                "order_id": t.order.orderId,
+                "symbol":   t.contract.symbol,
+                "action":   t.order.action,
+                "quantity": t.order.totalQuantity,
+                "status":   t.orderStatus.status,
+            }
+            for t in trades
+        ]
