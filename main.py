@@ -41,7 +41,7 @@ async def run() -> None:
     portfolio.add_strategy(MeanReversionMomentum(weight_allocation=0.5))
     portfolio.add_strategy(StatArbStrategy(weight_allocation=0.5))
 
-    await bootstrap_history_job(data_feed)
+    await bootstrap_history_job(data_feed, db)
     await daily_incremental_update_job(data_feed)
     await daily_trading_job(portfolio)
 
