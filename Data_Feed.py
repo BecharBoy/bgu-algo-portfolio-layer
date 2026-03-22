@@ -6,10 +6,11 @@ from typing import List
 from config import Settings
 from DB import DB
 
-class Data_Feed:
 
-    def __init__(self, setting: Settings, db: DB):
-        self.universe = setting.universe
+class DataFeed:
+
+    def __init__(self, settings: Settings, db: DB):
+        self.universe = settings.universe
         self.db = db
 
     async def fetch_current_prices(self) -> dict:
@@ -22,7 +23,6 @@ class Data_Feed:
             prices[ticker] = float(df["Close"].iloc[-1])
         return prices
 
-
     async def bootstrap_two_year_history(self) -> None:
         for ticker in self.universe:
             df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
@@ -31,7 +31,6 @@ class Data_Feed:
                 continue
             bars = self._df_to_bars(df)
             await self.db.upsert_ohlcv_bars(ticker, bars)
-
 
     async def daily_incremental_update(self) -> None:
         yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -56,5 +55,3 @@ class Data_Feed:
                 "volume": int(row["Volume"]),
             })
         return bars
-
-
