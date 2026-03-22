@@ -8,9 +8,7 @@ from DB import DB
 
 class Data_Feed:
 
-    def __init__(self, setting: Settings db: DB):
-        self.tickers = pd.read_csv("tickers.csv")
-        self.today = date.today().strftime("%Y-%m-%d")
+    def __init__(self, setting: Settings, db: DB):
         self.universe = setting.universe
         self.db = db
 
@@ -25,8 +23,6 @@ class Data_Feed:
         return prices
 
 
-        return todays_data
-
     async def bootstrap_two_year_history(self) -> None:
         for ticker in self.universe:
             df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
@@ -35,10 +31,9 @@ class Data_Feed:
                 continue
             bars = self._df_to_bars(df)
             await self.db.upsert_ohlcv_bars(ticker, bars)
-        return historical_data
 
 
-     async def daily_incremental_update(self) -> None:
+    async def daily_incremental_update(self) -> None:
         yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
         today = date.today().strftime("%Y-%m-%d")
         for ticker in self.universe:
