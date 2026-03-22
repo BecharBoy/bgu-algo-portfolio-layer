@@ -75,7 +75,9 @@ class Portfolio:
                 "tif":        "DAY",
                 "created_at": signal["timestamp"],
             })
-
+        fills = await self.ib.wait_for_order_updates(timeout_seconds=15)
+        for fill in fills:
+            await self.db.log_trade_execution(fill)
         await self.db.save_signals(clean_signals)
         await self.db.save_orders(orders)
 
