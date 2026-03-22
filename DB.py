@@ -218,7 +218,6 @@ class DB:
             """,
             ticker, lookback_days
         )
-    return [dict(row) for row in rows]
         return [dict(row) for row in rows]
 
     async def save_orders(self, orders: List[Dict]):
@@ -256,8 +255,8 @@ class DB:
             )
 
     async def get_signals_for_api(self, limit: int = 100) -> List[Dict]:
-         if self.pool is None:
-           raise RuntimeError("DB not connected — call connect() first")
+        if self.pool is None:
+            raise RuntimeError("DB not connected — call connect() first")
 
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
