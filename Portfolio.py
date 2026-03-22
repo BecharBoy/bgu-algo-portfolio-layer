@@ -1,65 +1,129 @@
 import asyncio
+from math import floor
 from typing import List, Dict
+from config import Settings
+from DB import DB
+from IB import IB
+from Strategy import Strategy
+from DataFeed import DataFeed
+import schemas
+
 
 class Portfolio:
-    def __init__(self, ib_client, db_client, data_feed, total_capital: float):
-        self.ib = ib_client
-        self.db = db_client
-        self.data_feed = data_feed
-        self.total_capital = total_capital
-        self.strategies = {}
 
-    def add_strategy(self, name, strategy):
-        # TODO: Validate strategy interface and uniqueness.
-        self.strategies[name] = strategy
+    def __init__(self, settings: Settings, db: DB, ib: IB, datafeed: DataFeed):
+        self.settings = settings
+        self.db = db
+        self.ib = ib
+        self.datafeed = datafeed
+        self.strategies: List[Strategy] = []
 
-    async def gather_signals(self, market_data, current_positions) -> List[dict]:
-        # TODO: Add timeout + per-strategy exception isolation.
-        tasks = [strategy.generate_signals(market_data, current_positions) for strategy in self.strategies.values()]
-
-        results = await asyncio.gather(*tasks)
-
-        # TODO: Validate signal schema and reject malformed signals.
-        return [signal for sublist in results for signal in sublist]
+    def add_strategy(self, strategy: Strategy) -> None:
+        self.strategies.append(strategy)
 
     def _apply_risk_management(self, signals: List[Dict]) -> List[Dict]:
-        # TODO: Apply portfolio-level risk caps before sizing.
-        # TODO: Add strategy-level max concurrent positions.
-        pass
-
-    async def run_cycle(self):
-        # TODO: Full cycle steps:
-        # TODO: 1) load universe + bars
-        # TODO: 2) load current positions/account snapshot
-        # TODO: 3) gather strategy signals
-        # TODO: 4) deduplicate/conflict resolution
-        # TODO: 5) risk gate + capital allocation
-        # TODO: 6) execute approved orders
-        # TODO: 7) persist signals/orders/fills/snapshots
-        pass
-
-
-    def allocate_capital(self, approved_signals: List[Dict], free_cash: float) -> List[Dict]:
-        # TODO: Convert approved signals into sized order intents.
-        # TODO: Keep sizing logic separate from signal generation.
-        pass
-
-    async def execute_approved_signals(self, orders_to_place: List[Dict]):
-        # TODO: Route single-leg vs pair-leg orders correctly.
-        # TODO: Persist broker acknowledgments and failures.
-        pass
-
-    def resolve_signal_conflicts(self, raw_signals: List[Dict]) -> List[Dict]:
-        # TODO: Resolve BUY/SELL conflicts across strategies on same symbol.
-        # TODO: Decide precedence/aggregation policy and document it.
-        pass
+        # TODO: Max position size per symbol (e.g. never allocate > 20% NLV to one ticker)
+        # TODO: Max concurrent positions cap
+        # TODO: Drawdown circuit breaker
+        return signals
 
     def enforce_signal_timing(self, signals: List[Dict]) -> List[Dict]:
-        # TODO: Enforce anti-lookahead timing (signal on close, execute next session).
-        pass
+        # Signals generated on today's close execute next session only.
+        # Currently enforced by job scheduling — revisit if intraday execution added.
+        return signals
+
+    async def run_cycle(self) -> None:
+        if not self.strategies:
+            raise RuntimeError("No strategies registered — call add_strategy() first")
+
+        current_prices = await self.datafeed.fetch_current_prices()
+        open_positions = await self.db.get_open_positions_from_db()
+        account = await self.ib.get_account_summary()
+        nlv = account["nlv"]
+        cash = account["cash"]
+
+        raw_signals = []
+        for strategy in self.strategies:
+            bars = await self.db.get_recent_bars_for_strategy(strategy)
+            signals = await strategy.generate_signals(bars, open_positions, current_prices)
+            raw_signals.extend(signals)
+
+        if not raw_signals:
+            logging.warning("run_cycle: no signals generated — strategies returned empty. Check bar data and strategy logic.")
+            return
+
+        clean_signals = schemas.deduplicate_signals(raw_signals)
+        clean_signals = self._apply_risk_management(clean_signals)
+
+        orders = []
+        for signal in clean_signals:
+            ticker = signal["symbol"]
+            price = current_prices.get(ticker)
+            if not price:
+                continue
+            quantity = floor((nlv * signal["weight_allocation"]) / price)
+            if quantity <= 0:
+                continue
+            orders.append({
+                "order_id":   f"{signal['signal_id']}_order",
+                "signal_id":  signal["signal_id"],
+                "strategy":   signal["strategy"],
+                "symbol":     ticker,
+                "action":     signal["action"],
+                "quantity":   quantity,
+                "order_type": "MKT",
+                "tif":        "DAY",
+                "created_at": signal["timestamp"],
+            })
+
+        await self.db.save_signals(clean_signals)
+        await self.db.save_orders(orders)
+
+        for order in orders:
+            await self.ib.place_order(order)
+
+        await self.db.update_account_snapshot(nlv=nlv, cash=cash)
 
     async def dry_run_cycle(self) -> Dict:
-        # TODO: Run full pipeline without placing broker orders.
-        # TODO: Return detailed summary for daily validation.
-        pass
+        if not self.strategies:
+            raise RuntimeError("No strategies registered")
 
+        current_prices = await self.datafeed.fetch_current_prices()
+        open_positions = await self.db.get_open_positions_from_db()
+        account = await self.ib.get_account_summary()
+        nlv = account["nlv"]
+
+        raw_signals = []
+        for strategy in self.strategies:
+            bars = await self.db.get_recent_bars_for_strategy(strategy)
+            signals = await strategy.generate_signals(bars, open_positions, current_prices)
+            raw_signals.extend(signals)
+
+        if not raw_signals:
+            return {"signals": [], "orders": [], "note": "no signals generated"}
+
+        clean_signals = schemas.deduplicate_signals(raw_signals)
+        clean_signals = self._apply_risk_management(clean_signals)
+
+        orders = []
+        for signal in clean_signals:
+            ticker = signal["symbol"]
+            price = current_prices.get(ticker)
+            if not price:
+                continue
+            quantity = floor((nlv * signal["weight_allocation"]) / price)
+            if quantity <= 0:
+                continue
+            orders.append({
+                "order_id":   f"{signal['signal_id']}_order",
+                "signal_id":  signal["signal_id"],
+                "strategy":   signal["strategy"],
+                "symbol":     ticker,
+                "action":     signal["action"],
+                "quantity":   quantity,
+                "order_type": "MKT",
+                "tif":        "DAY",
+                "created_at": signal["timestamp"],
+            })
+
+        return {"signals": clean_signals, "orders": orders}
