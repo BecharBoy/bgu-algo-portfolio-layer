@@ -167,8 +167,12 @@ class DB:
                     nlv         FLOAT       NOT NULL,
                     cash        FLOAT       NOT NULL,
                     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                );
-            """)
+                    
+                CREATE TABLE IF NOT EXISTS system_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
 
     async def upsert_ohlcv_bars(self, ticker: str, bars: List[Dict]):
         if self.pool is None:
@@ -269,3 +273,23 @@ class DB:
                 limit
             )
         return [dict(row) for row in rows]
+
+
+
+    async def get_system_flag(self, key: str) -> str | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM system_state WHERE key = $1", key
+            )
+        return row["value"] if row else None
+    
+    async def set_system_flag(self, key: str, value: str) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO system_state (key, value)
+                VALUES ($1, $2)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                key, value,
+            )
