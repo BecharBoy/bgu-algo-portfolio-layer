@@ -10,8 +10,8 @@ class Settings:
     ib_client_id: int
     db_connection_string: str
     gemini_api_key: str
-    trade_mode: str = "paper"
     universe: List[str]
+    trade_mode: str = "paper"
 
 
 
