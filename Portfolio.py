@@ -3,7 +3,7 @@ from math import floor
 from typing import List, Dict
 from config import Settings
 from DB import DB
-from IB import IB
+from IB import IB_Connect
 from Strategy import Strategy
 from DataFeed import DataFeed
 import schemas
