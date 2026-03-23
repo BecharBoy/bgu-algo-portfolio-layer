@@ -23,11 +23,45 @@ class Portfolio:
     def add_strategy(self, strategy: BaseStrategy) -> None:
         self.strategies.append(strategy)
 
-    def _apply_risk_management(self, signals: List[Dict]) -> List[Dict]:
-        # TODO: Max position size per symbol (e.g. never allocate > 20% NLV to one ticker)
-        # TODO: Max concurrent positions cap
-        # TODO: Drawdown circuit breaker
-        return signals
+    # Replace _apply_risk_management in Portfolio.py
+
+def _apply_risk_management(self, signals: List[Dict]) -> List[Dict]:
+    # --- 1. Conflict resolution: opposing signals on same ticker → cancel both ---
+    action_map: Dict[str, str] = {}
+    conflicts: set = set()
+
+    for sig in signals:
+        sym = sig["symbol"]
+        if sym in action_map:
+            if action_map[sym] != sig["action"]:
+                conflicts.add(sym)
+        else:
+            action_map[sym] = sig["action"]
+
+    signals = [s for s in signals if s["symbol"] not in conflicts]
+    if conflicts:
+        logging.warning(
+            f"risk_management: cancelled conflicting signals for: {conflicts}"
+        )
+
+    # --- 2. Max position count cap ---
+    max_positions = self.settings.max_concurrent_positions  # add to Settings
+    if len(signals) > max_positions:
+        signals = signals[:max_positions]
+        logging.warning(
+            f"risk_management: capped signals to {max_positions}"
+        )
+
+    # --- 3. Per-signal weight cap: never > 20% NLV in one ticker ---
+    for sig in signals:
+        if sig.get("weight_allocation", 0) > 0.20:
+            sig["weight_allocation"] = 0.20
+            logging.warning(
+                f"risk_management: capped weight_allocation for {sig['symbol']} to 0.20"
+            )
+
+    return signals
+
 
     def enforce_signal_timing(self, signals: List[Dict]) -> List[Dict]:
         # Signals generated on today's close execute next session only.
