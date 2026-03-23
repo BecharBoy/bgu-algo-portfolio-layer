@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from typing import List
 from config import Settings
 from DB import DB
+import csv
 
 
 class DataFeed:
@@ -12,6 +13,8 @@ class DataFeed:
     def __init__(self, settings: Settings, db: DB):
         self.universe = settings.universe
         self.db = db
+        with open("tickers.csv", "r") as f:
+            self.tickers = [row[0].strip() for row in csv.reader(f) if row and row[0].strip()]
 
     async def fetch_current_prices(self) -> dict:
         prices = {}
