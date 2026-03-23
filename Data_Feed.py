@@ -16,12 +16,13 @@ class DataFeed:
     async def fetch_current_prices(self) -> dict:
         prices = {}
         for ticker in self.universe:
-            df = yf.download(ticker, period="1d", interval="1d", auto_adjust=True, progress=False)
-            if df.empty:
+            t = yf.Ticker(ticker)
+            last = t.fast_info.get("last_price")
+            if last is None:
                 logging.warning(f"No live price for {ticker}")
                 continue
-            prices[ticker] = float(df["Close"].iloc[-1])
-        return prices
+            prices[ticker] = float(last)
+    return prices
 
     async def bootstrap_two_year_history(self) -> None:
         for ticker in self.universe:
