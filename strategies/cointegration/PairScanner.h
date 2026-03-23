@@ -22,7 +22,13 @@ private:
     // TODO: Add cap or ranking policy for very large result sets.
 
     // the process that every operation will run
-    void worker_task(const MarketData& data, int start_row, int end_row, double min_correlation);
+    void worker_task(
+    const MarketData& data,
+    int start_row,
+    int end_row,
+    double min_correlation,
+    std::vector<PairResult>& local_results);
+
 
 public:
     // TODO: Add deterministic ordering of output pairs for reproducibility.
