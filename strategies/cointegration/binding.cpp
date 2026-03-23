@@ -2,9 +2,9 @@
 #include <pybind11/stl.h>
 #include <vector>
 #include <string>
-#include MarketData.h
-#include PairScanner.h
-#include MathStats.h
+#include "MarketData.h"
+#include "PairScanner.h"
+#include "MathStats.h"
 #include <stdexcept>
 // TODO: Include your headers (MarketData.h, PairScanner.h, MathStats.h)
 // TODO: Add any extra includes needed for validation and error handling.
