@@ -27,7 +27,7 @@ async def run() -> None:
     await db.connect()
     await db.init_schema()
 
-    data_feed = DataFeed(settings=settings, db=db, tickers = load_tickers("tickers.csv")
+    data_feed = DataFeed(settings=settings, db=db)
 
     ib = IB_Connect(
         host=settings.ib_host,
