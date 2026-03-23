@@ -9,7 +9,11 @@ from Portfolio import Portfolio
 from jobs import bootstrap_history_job, daily_incremental_update_job, daily_trading_job
 from strategies.mean_reversion.meanreversion import MeanReversionMomentum
 from strategies.cointegration.StatArbStrategy import StatArbStrategy
+import csv
 
+def load_tickers(path: str) -> list[str]:
+    with open(path, "r") as f:
+        return [row[0].strip() for row in csv.reader(f) if row and row[0].strip()]
 
 async def run() -> None:
     logging.basicConfig(
@@ -23,7 +27,7 @@ async def run() -> None:
     await db.connect()
     await db.init_schema()
 
-    data_feed = DataFeed(settings=settings, db=db)
+    data_feed = DataFeed(settings=settings, db=db, tickers = load_tickers("tickers.csv")
 
     ib = IB_Connect(
         host=settings.ib_host,
