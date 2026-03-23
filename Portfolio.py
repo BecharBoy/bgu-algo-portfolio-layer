@@ -1,24 +1,26 @@
 import asyncio
+import logging
+import pandas as pd
 from math import floor
 from typing import List, Dict
 from config import Settings
 from DB import DB
 from IB import IB_Connect
-from Strategy import Strategy
-from DataFeed import DataFeed
+from Strategy import BaseStrategy
+from Data_Feed import DataFeed
 import schemas
 
 
 class Portfolio:
 
-    def __init__(self, settings: Settings, db: DB, ib: IB, datafeed: DataFeed):
+    def __init__(self, settings: Settings, db: DB, ib: IB_Connect, datafeed: DataFeed):
         self.settings = settings
         self.db = db
         self.ib = ib
         self.datafeed = datafeed
-        self.strategies: List[Strategy] = []
+        self.strategies: List[BaseStrategy] = []
 
-    def add_strategy(self, strategy: Strategy) -> None:
+    def add_strategy(self, strategy: BaseStrategy) -> None:
         self.strategies.append(strategy)
 
     def _apply_risk_management(self, signals: List[Dict]) -> List[Dict]:
@@ -32,6 +34,14 @@ class Portfolio:
         # Currently enforced by job scheduling — revisit if intraday execution added.
         return signals
 
+    async def _fetch_bars_for_all_tickers(self, lookback_days: int = 60) -> Dict[str, pd.DataFrame]:
+        all_bars: Dict[str, pd.DataFrame] = {}
+        for ticker in self.settings.universe:
+            rows = await self.db.get_recent_bars(ticker, lookback_days=lookback_days)
+            if rows:
+                all_bars[ticker] = pd.DataFrame(rows).sort_values("date")
+        return all_bars
+
     async def run_cycle(self) -> None:
         if not self.strategies:
             raise RuntimeError("No strategies registered — call add_strategy() first")
@@ -42,14 +52,15 @@ class Portfolio:
         nlv = account["nlv"]
         cash = account["cash"]
 
+        all_bars = await self._fetch_bars_for_all_tickers()
+
         raw_signals = []
         for strategy in self.strategies:
-            bars = await self.db.get_recent_bars_for_strategy(strategy)
-            signals = await strategy.generate_signals(bars, open_positions, current_prices)
+            signals = await strategy.generate_signals(all_bars, open_positions)
             raw_signals.extend(signals)
 
         if not raw_signals:
-            logging.warning("run_cycle: no signals generated — strategies returned empty. Check bar data and strategy logic.")
+            logging.info("run_cycle: no signals generated this session.")
             return
 
         clean_signals = schemas.deduplicate_signals(raw_signals)
@@ -75,15 +86,20 @@ class Portfolio:
                 "tif":        "DAY",
                 "created_at": signal["timestamp"],
             })
-        fills = await self.ib.wait_for_order_updates(timeout_seconds=15)
-        for fill in fills:
-            await self.db.log_trade_execution(fill)
 
         await self.db.save_signals(clean_signals)
         await self.db.save_orders(orders)
 
         for order in orders:
-            await self.ib.place_order(order)
+            await self.ib.place_market_order(
+                action=order["action"],
+                symbol=order["symbol"],
+                quantity=order["quantity"],
+            )
+
+        fills = await self.ib.wait_for_order_updates(timeout_seconds=15)
+        for fill in fills:
+            await self.db.log_trade_execution(fill)
 
         await self.db.update_account_snapshot(nlv=nlv, cash=cash)
 
@@ -96,15 +112,11 @@ class Portfolio:
         account = await self.ib.get_account_summary()
         nlv = account["nlv"]
 
+        all_bars = await self._fetch_bars_for_all_tickers()
+
         raw_signals = []
         for strategy in self.strategies:
-            all_bars: Dict[str, pd.DataFrame] = {}
-            for ticker in self.settings.universe:
-                rows = await self.db.get_recent_bars(ticker, lookback_days=60)
-                if rows:
-                    all_bars[ticker] = pd.DataFrame(rows).sort_values("date")
-
-            signals = await strategy.generate_signals(bars, open_positions, current_prices)
+            signals = await strategy.generate_signals(all_bars, open_positions)
             raw_signals.extend(signals)
 
         if not raw_signals:
