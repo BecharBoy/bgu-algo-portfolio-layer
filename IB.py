@@ -1,5 +1,6 @@
 import asyncio
 from ib_async import IB, Stock, MarketOrder
+import uuid
 
 class IB_Connect:
     def __init__(self, host: str, port: int, client_id: int):
@@ -58,6 +59,8 @@ class IB_Connect:
                 "quantity":   f.execution.shares,
                 "fill_price": f.execution.price,
                 "filled_at":  f.execution.time,
+                "fill_id": str(uuid.uuid4()),
+
             }
             for f in self.ib.fills()
         ]
