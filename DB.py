@@ -167,7 +167,8 @@ class DB:
                     nlv         FLOAT       NOT NULL,
                     cash        FLOAT       NOT NULL,
                     recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    
+                );
+                
                 CREATE TABLE IF NOT EXISTS system_state (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
