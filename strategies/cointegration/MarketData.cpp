@@ -1,11 +1,7 @@
-//
-// Created by Ksenia on 06/03/2026.
-//
 
 #include "MarketData.h"
 
 MarketData::MarketData(int stocks, int days) {
-    // TODO: Validate stocks/days > 0 and throw on invalid input.
     num_stocks = stocks;
     num_days = days;
 
@@ -18,20 +14,16 @@ MarketData::MarketData(int stocks, int days) {
     }
 }
 MarketData::~MarketData() {
-    // TODO: Consider RAII container (std::vector<double>) instead of manual new/delete.
     delete[] price_matrix;
 }
 
-// TODO: Fix method signature typo and ensure this definition matches header exactly.
-void::MarketData::set_price(int stock_idx, int day_idx, double price) {
-    // TODO: Add bounds checks for stock_idx/day_idx before writing memory.
+void MarketData::set_price(int stock_idx, int day_idx, double price) {
     // calculating the real index in the one dimension matrix
     int index = stock_idx * num_days + day_idx;
     price_matrix[index] = price;
 }
 
 double MarketData::get_price(int stock_idx, int day_idx) const {
-    // TODO: Add bounds checks for stock_idx/day_idx before reading memory.
     int index = stock_idx * num_days + day_idx;
     return price_matrix[index];
 }
