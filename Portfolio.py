@@ -97,7 +97,12 @@ class Portfolio:
 
         raw_signals = []
         for strategy in self.strategies:
-            bars = await self.db.get_recent_bars_for_strategy(strategy)
+            all_bars: Dict[str, pd.DataFrame] = {}
+            for ticker in self.settings.universe:
+                rows = await self.db.get_recent_bars(ticker, lookback_days=60)
+                if rows:
+                    all_bars[ticker] = pd.DataFrame(rows).sort_values("date")
+
             signals = await strategy.generate_signals(bars, open_positions, current_prices)
             raw_signals.extend(signals)
 
