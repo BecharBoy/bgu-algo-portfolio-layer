@@ -48,6 +48,8 @@ class Portfolio:
 
         current_prices = await self.datafeed.fetch_current_prices()
         open_positions = await self.db.get_open_positions_from_db()
+        open_positions_raw = await self.db.get_open_positions_from_db()
+        open_positions = {p["symbol"]: p for p in open_positions_raw}
         account = await self.ib.get_account_summary()
         nlv = account["nlv"]
         cash = account["cash"]
@@ -109,6 +111,8 @@ class Portfolio:
 
         current_prices = await self.datafeed.fetch_current_prices()
         open_positions = await self.db.get_open_positions_from_db()
+        open_positions_raw = await self.db.get_open_positions_from_db()
+        open_positions = {p["symbol"]: p for p in open_positions_raw}
         account = await self.ib.get_account_summary()
         nlv = account["nlv"]
 
