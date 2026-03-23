@@ -2,7 +2,8 @@ import pandas as pd
 import talib as ta
 from typing import List, Dict, Any
 from Strategy import BaseStrategy
-
+import uuid
+from datetime import datetime, timezone
 
 class MeanReversionMomentum(BaseStrategy):
     def __init__(self, name: str = "MeanReversionMomentum", weight_allocation: float = 0.5):
@@ -97,15 +98,16 @@ class MeanReversionMomentum(BaseStrategy):
         # TODO: Define partial vs full exit behavior.
         pass
 
-    def _build_signal(self, symbol: str, action: str, current_price: float, reason: str) -> Dict[str, Any]:
-        # TODO: Add stable signal_id and timestamp.
-        # TODO: Include indicator snapshot for diagnostics.
+    def _build_signal(self, symbol, action, current_price, reason) -> Dict:
         return {
-            "symbol": symbol,
-            "action": action,
-            "strategy": self.name,
+            "signal_id":       str(uuid.uuid4()),
+            "timestamp":       datetime.now(timezone.utc).isoformat(),
+            "symbol":          symbol,
+            "action":          action,
+            "strategy":        self.name,
             "price_reference": current_price,
-            "reason": reason,
+            "reason":          reason,
+            "weight_allocation": self.weight_allocation,
         }
 
     def _validate_indicator_row(self, row: pd.Series) -> bool:
