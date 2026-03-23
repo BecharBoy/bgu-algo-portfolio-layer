@@ -27,8 +27,7 @@ void PairScanner::worker_task(const MarketData &data, int start_row, int end_row
 }
 
 std::vector<PairResult> PairScanner::scan_all_pairs(const MarketData &data, int num_threads, double min_correlation) {
-    // TODO: Clear previous run state so results do not accumulate across calls.
-    // TODO: Validate num_threads > 0 before division.
+    top_pairs.clear();
     std::vector<std::thread> threads;
     int num_stocks = data.get_num_stocks();
 
