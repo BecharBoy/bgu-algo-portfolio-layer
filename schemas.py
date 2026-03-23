@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, TypedDict
+import logging
 
 class Signal(TypedDict, total=False):
     signal_id: str
@@ -68,17 +69,64 @@ def validate_order_intent(order: Dict[str, Any]) -> bool:
 def deduplicate_signals(signals: List[Signal]) -> List[Signal]:
     # Deduplicate keeping the latest signal per (strategy, symbol, action) bucket
     unique_signals: Dict[str, Signal] = {}
-    
+
     for sig in signals:
         # Discard structurally invalid signals immediately
         if not validate_signal(sig):
             continue
-            
+
         # Create a unique composite key for the bucket
         bucket_key = f"{sig['strategy']}_{sig['symbol']}_{sig['action']}"
-        
-        # Overwriting the key guarantees we keep the most recently processed signal 
+
+        # Overwriting the key guarantees we keep the most recently processed signal
         # for this specific action and symbol from this strategy.
         unique_signals[bucket_key] = sig
 
     return list(unique_signals.values())
+
+
+def aggregate_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Cross-strategy conflict resolver.
+
+    Called BEFORE deduplicate_signals in Portfolio.run_cycle().
+    Groups all signals by symbol. If two strategies disagree on
+    direction for the same symbol (one BUY, one SELL), both are
+    dropped — we do not trade a symbol where strategies conflict.
+    If both agree on direction, keep the one with the highest
+    weight_allocation (proxy for confidence).
+
+    This prevents the system from placing both a BUY and a SELL
+    for the same symbol in the same cycle, which would waste
+    transaction costs and net to zero exposure.
+    """
+    # Group by symbol
+    by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    for sig in signals:
+        sym = sig.get("symbol")
+        if not sym:
+            continue
+        if sym not in by_symbol:
+            by_symbol[sym] = []
+        by_symbol[sym].append(sig)
+
+    result: List[Dict[str, Any]] = []
+
+    for symbol, sym_signals in by_symbol.items():
+        actions = {s["action"] for s in sym_signals if "action" in s}
+
+        # Conflict: strategies disagree on direction — cancel both
+        if len(actions) > 1:
+            strategies_in_conflict = [s.get("strategy", "unknown") for s in sym_signals]
+            logging.warning(
+                f"aggregate_signals: conflict on {symbol} "
+                f"from {strategies_in_conflict} — cancelling both."
+            )
+            continue
+
+        # No conflict: keep the signal with the highest weight_allocation
+        # (falls back to 0.0 if key is missing, so all signals are still valid)
+        best = max(sym_signals, key=lambda s: s.get("weight_allocation", 0.0))
+        result.append(best)
+
+    return result
