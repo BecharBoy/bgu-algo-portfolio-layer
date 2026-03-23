@@ -93,10 +93,16 @@ class MeanReversionMomentum(BaseStrategy):
 
         return False
 
-    def _get_sell_signal(self, df: pd.DataFrame, pos_data: Dict[str, Any], current_price: float) -> bool:
-        # TODO: Implement exit logic (target, stop, time stop, momentum decay).
-        # TODO: Define partial vs full exit behavior.
-        pass
+    def _get_sell_signal(self, df: pd.DataFrame, pos_data: Dict, current_price: float) -> bool:
+        last = df.iloc[-1]
+        if last["RSI"] > 70:
+            return True
+        if current_price > last["Upper_BB"]:
+            return True
+        prev = df.iloc[-2]
+        if last["MACD_Line"] <= last["MACD_Signal"] and prev["MACD_Line"] >= prev["MACD_Signal"]:
+            return True
+        return False
 
     def _build_signal(self, symbol, action, current_price, reason) -> Dict:
         return {
