@@ -82,17 +82,6 @@ class MeanReversionMomentum(BaseStrategy):
 
         return signals
 
-    def _get_buy_signal(self, df: pd.DataFrame, current_price: float) -> bool:
-        # TODO: Replace placeholder crossover logic with full mean reversion criteria.
-        # TODO: Use RSI, ATR, Bollinger, and trend filter consistently.
-        last_row = df.iloc[-1]
-        prev_row = df.iloc[-2]
-
-        if last_row["MACD_Line"] >= last_row["MACD_Signal"] and prev_row["MACD_Line"] <= prev_row["MACD_Signal"]:
-            return True
-
-        return False
-
     def _get_sell_signal(self, df: pd.DataFrame, pos_data: Dict, current_price: float) -> bool:
         last = df.iloc[-1]
         if last["RSI"] > 70:
@@ -117,5 +106,36 @@ class MeanReversionMomentum(BaseStrategy):
         }
 
     def _validate_indicator_row(self, row: pd.Series) -> bool:
-        # TODO: Validate NaNs and malformed final rows before decision logic.
-        pass
+    required = ["SMA", "Upper_BB", "Lower_BB", "RSI", "ATR", "MACD_Line", "MACD_Signal"]
+    for col in required:
+        if col not in row.index:
+            return False
+        if pd.isna(row[col]):
+            return False
+    return True
+
+    def _get_buy_signal(self, df: pd.DataFrame, current_price: float) -> bool:
+        if len(df) < 2:
+            return False
+    
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2]
+    
+        if not self._validate_indicator_row(last_row):
+            return False
+        if not self._validate_indicator_row(prev_row):
+            return False
+    
+        # Entry: price below lower Bollinger Band (oversold by price)
+        price_oversold = current_price < last_row["Lower_BB"]
+    
+        # RSI confirms oversold
+        rsi_oversold = last_row["RSI"] < 35
+    
+        # MACD bullish crossover
+        macd_cross_up = (
+            last_row["MACD_Line"] >= last_row["MACD_Signal"] and
+            prev_row["MACD_Line"] <  prev_row["MACD_Signal"]
+        )
+    
+        return price_oversold and rsi_oversold and macd_cross_up
