@@ -77,7 +77,7 @@ std::vector<CointegratedPair> run_cpp_scan(
         const double* stock_x = market_data.get_stock_data(pair.stock_a_idx);
         const double* stock_y = market_data.get_stock_data(pair.stock_b_idx);
 
-        OLSResult ols = MathStats::calculate_OLS(stock_x, stock_y, num_days)
+        OLSResult ols = MathStats::calculate_OLS(stock_x, stock_y, num_days);
         Eigen::VectorXd spread = MathStats::calculate_spread(stock_x, stock_y, num_days, ols.alpha, ols.beta);
 
         double adf_stat = MathStats::calculate_adf_statistic(spread);
