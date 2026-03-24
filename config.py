@@ -12,6 +12,7 @@ class Settings:
     gemini_api_key: str
     universe: List[str]
     trade_mode: str = "paper"
+    max_concurrent_positions: int = 10
 
 
 
