@@ -7,6 +7,8 @@ from config import Settings
 from DB import DB
 import csv
 
+logger = logging.getLogger(__name__)
+
 
 class DataFeed:
 
@@ -22,19 +24,20 @@ class DataFeed:
             t = yf.Ticker(ticker)
             last = t.fast_info.get("last_price")
             if last is None:
-                logging.warning(f"No live price for {ticker}")
+                logger.warning(f"No live price for {ticker}")
                 continue
             prices[ticker] = float(last)
-    return prices
+        return prices  # fixed: was outside function body
 
     async def bootstrap_two_year_history(self) -> None:
         for ticker in self.universe:
             df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
             if df.empty:
-                logging.warning(f"No data returned for {ticker} during bootstrap")
+                logger.warning(f"[DOWNLOAD] No data returned for {ticker} during bootstrap")
                 continue
             bars = self._df_to_bars(df)
             await self.db.upsert_ohlcv_bars(ticker, bars)
+            logger.info(f"[DOWNLOAD] bootstrap: stored {len(bars)} bars for {ticker}")
 
     async def daily_incremental_update(self) -> None:
         yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -42,10 +45,11 @@ class DataFeed:
         for ticker in self.universe:
             df = yf.download(ticker, start=yesterday, end=today, interval="1d", auto_adjust=True, progress=False)
             if df.empty:
-                logging.warning(f"No bar returned for {ticker} on {yesterday}")
+                logger.warning(f"[DOWNLOAD] No bar returned for {ticker} on {yesterday}")
                 continue
             bars = self._df_to_bars(df)
             await self.db.upsert_ohlcv_bars(ticker, bars)
+            logger.info(f"[DOWNLOAD] {ticker}: 1 bar stored for {yesterday}")
 
     def _df_to_bars(self, df: pd.DataFrame) -> List[dict]:
         bars = []
