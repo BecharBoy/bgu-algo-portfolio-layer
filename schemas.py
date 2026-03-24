@@ -51,7 +51,7 @@ def validate_order_intent(order: Dict[str, Any]) -> bool:
         return False
 
     # Validate strategy source (matching the ones registered in Portfolio.py)
-    allowed_strategies = {"MeanReversionMomentum", "CointegrationArb"}
+    allowed_strategies = {"MeanReversionMomentum", "StatArbStrategy"}
     if order["strategy"] not in allowed_strategies:
         return False
 
