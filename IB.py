@@ -2,6 +2,7 @@ import asyncio
 from ib_async import IB, Stock, MarketOrder
 import uuid
 
+
 class IB_Connect:
     def __init__(self, host: str, port: int, client_id: int):
         self.host = host
@@ -50,20 +51,37 @@ class IB_Connect:
         trade = self.ib.placeOrder(contract, order)
         return {"order_id": trade.order.orderId, "status": trade.orderStatus.status}
 
-    async def wait_for_order_updates(self, timeout_seconds: int = 15) -> list[dict]:
-        await asyncio.sleep(timeout_seconds)
-        return [
-            {
-                "order_id":   f.execution.orderId,
-                "symbol":     f.contract.symbol,
-                "quantity":   f.execution.shares,
-                "fill_price": f.execution.price,
-                "filled_at":  f.execution.time,
-                "fill_id": str(uuid.uuid4()),
+    async def wait_for_order_fill(
+        self, order_id: int, timeout_seconds: int = 30
+    ) -> dict | None:
+        """
+        Wait for a specific order to fill using IB's execDetailsEvent.
+        Returns the fill dict once confirmed, or None on timeout.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
 
-            }
-            for f in self.ib.fills()
-        ]
+        def on_exec_details(trade, fill):
+            # Only resolve for the specific order we are waiting on
+            if fill.execution.orderId == order_id and not future.done():
+                future.set_result({
+                    "order_id":   fill.execution.orderId,
+                    "symbol":     fill.contract.symbol,
+                    "action":     fill.execution.side,   # "BOT" or "SLD"
+                    "quantity":   fill.execution.shares,
+                    "fill_price": fill.execution.price,
+                    "filled_at":  fill.execution.time,
+                    "fill_id":    str(uuid.uuid4()),
+                })
+
+        self.ib.execDetailsEvent += on_exec_details
+        try:
+            return await asyncio.wait_for(future, timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            # Always unsubscribe to avoid stale callbacks accumulating
+            self.ib.execDetailsEvent -= on_exec_details
 
     async def get_open_orders(self) -> list[dict]:
         trades = await self.ib.reqOpenOrdersAsync()
