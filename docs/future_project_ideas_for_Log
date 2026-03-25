@@ -1,0 +1,297 @@
+# GNN + Market Regimes – Notes for Future Me
+
+This file is my *translation layer*: serious research terms + a simple explanation
+for each, so I can reload the whole picture quickly.
+
+---
+
+## 1. Core Objects
+
+### 1.1 Market Regime
+
+**Formal definition**
+
+A **market regime** is a persistent macro–state of the market characterized by
+typical levels and structures of return, volatility, and cross‑asset dependence
+(e.g., bull, bear, high‑volatility crisis, low‑volatility expansion).
+
+**Simple explanation**
+
+Market regime = the current *weather* of the market:  
+sunny (calm uptrend), cloudy (sideways), storm (crash), etc.  
+We look at recent days and give the market a weather name.
+
+---
+
+### 1.2 Market Graph
+
+**Formal definition**
+
+A **market graph** at time \(t\) is \(G_t = (V, E_t)\):
+
+- Nodes \(V\): assets (stocks).
+- Edges \(E_t\): relations such as correlations, industry links, or
+  co‑movement measures.
+- Each node has features \(x_v \in \mathbb{R}^F\).
+- Each edge may have features \(e_{uv} \in \mathbb{R}^K\).
+
+**Simple explanation**
+
+Draw each stock as a dot.  
+Connect two dots with a line if they are related (move together, same sector,
+good pair, etc.).  
+Every dot gets a long list of numbers (its “profile”), and every line can also
+have numbers that describe the relationship.
+
+---
+
+### 1.3 Node Feature Vector
+
+**Formal definition**
+
+For each asset \(v\), we define a high‑dimensional feature vector
+\(x_v \in \mathbb{R}^F\) that aggregates heterogeneous information such as:
+
+- recent returns at multiple horizons,  
+- realized volatility, volume, liquidity measures,  
+- factor exposures,  
+- possibly embeddings from text/news or fundamentals.
+
+**Simple explanation**
+
+Each stock gets a “profile card” full of numbers:  
+how much it moved recently, how jumpy it is, how much it traded, maybe what
+sector it’s in, etc.  
+All of that is stored as one big vector of numbers.
+
+---
+
+### 1.4 Regime Label
+
+**Formal definition**
+
+Given a time window \(W_t\) (e.g., the last 60 trading days), we assign a
+**regime label** \(y_t\) from a finite set of regimes based on criteria such as:
+
+- realized volatility,  
+- index drawdown patterns,  
+- correlation structure,  
+- or an external macro/market classification.
+
+**Simple explanation**
+
+Take the last N days, look at what happened, and write one word on them:
+“calm uptrend”, “storm”, “choppy sideways”, etc.  
+That word is the regime label for that period.
+
+---
+
+## 2. GNN Side
+
+### 2.1 Graph Neural Network (GNN)
+
+**Formal definition**
+
+A **Graph Neural Network** updates node (and optionally edge/graph)
+representations via message passing on the graph. A basic layer has the form
+
+\[
+H^{(l+1)} = \sigma(\tilde A H^{(l)} W^{(l)}),
+\]
+
+where:
+
+- \(H^{(l)}\) is the node feature matrix at layer \(l\),
+- \(\tilde A\) is a normalized adjacency/proagation matrix,
+- \(W^{(l)}\) are learnable weights,
+- \(\sigma\) is a nonlinearity.
+
+**Simple explanation**
+
+Each stock talks to its neighbors in the web:
+
+- it listens to their info,
+- mixes it with its own,
+- and updates what it “knows”.
+
+Doing this a few times lets each stock know about its neighborhood in the
+market graph.
+
+---
+
+### 2.2 Oversmoothing
+
+**Formal definition**
+
+**Oversmoothing** in message‑passing GNNs occurs when repeated propagation causes
+node embeddings to converge toward a low‑dimensional subspace, so that
+representations of different nodes become nearly indistinguishable and
+downstream performance degrades.
+
+**Simple explanation**
+
+If you let everyone in the network talk to everyone too many times, they all
+start thinking almost the same thing.  
+Then the model can’t really tell stocks apart anymore.
+
+---
+
+### 2.3 Positional and Structural Encodings
+
+**Formal definition**
+
+**Positional / structural encodings** (e.g., Laplacian positional encodings,
+random‑walk structural encodings, degree/centrality features, random IDs)
+augment the raw node features with information about each node’s position and
+role in the graph. This increases expressivity beyond anonymous message passing
+and can help overcome 1‑WL‑type limitations.
+
+**Simple explanation**
+
+We give each stock some extra “name tags” about where it is and what role it
+plays in the web:
+
+- how central it is,
+- how many neighbors it has,
+- how easily a random walk returns there,
+- maybe even a random unique tag.
+
+These tags help the model see differences between stocks that otherwise look
+too similar.
+
+---
+
+### 2.4 Temporal Graph Model
+
+**Formal definition**
+
+A **temporal graph model** (spatiotemporal GNN) jointly models a sequence of
+graphs \(\{G_t\}\), capturing both:
+
+- spatial structure (edges at each time), and  
+- temporal dynamics (how features and edges evolve),
+
+to predict time‑dependent targets such as future regimes or volatility.
+
+**Simple explanation**
+
+Instead of one static web, we have a movie:  
+the web changes every day.  
+
+A temporal GNN tries to learn from both:
+
+- the shape of the web *today*, and  
+- how that web has been moving over time.
+
+---
+
+## 3. Candidate Research Questions
+
+Below: serious wording + simple restatement for future me.
+
+### 3.1 RQ1 – Oversmoothing vs. Market Regimes
+
+**Research phrasing**
+
+> How does oversmoothing in GNNs depend on the connectivity structure of
+>  market graphs across different regimes, and can oversmoothing‑mitigation
+>  techniques (e.g., PairNorm, DropEdge, GCNII) improve regime classification
+>  and volatility prediction performance in highly correlated markets?
+
+**Simple explanation**
+
+Question:  
+When the market is very “all‑together” (everything moves with everything,
+crisis style), does my GNN start to treat all stocks as the same and make worse
+predictions?
+
+If yes, can tricks that *keep node embeddings spread out* (PairNorm, DropEdge,
+GCNII) help the model:
+
+- keep stocks distinct, and  
+- make better calls about what market weather we’re in, or how volatile things
+  will be?
+
+---
+
+### 3.2 RQ2 – Expressivity & Encodings on Market Graphs
+
+**Research phrasing**
+
+> To what extent do positional and structural encodings (e.g., Laplacian PE,
+>  random‑walk structural encodings, random node features) increase the
+>  expressive power of message‑passing GNNs on equity correlation graphs, in
+>  terms of distinguishing structurally similar nodes and improving downstream
+>  tasks such as future volatility/return prediction or regime detection?
+
+**Simple explanation**
+
+Question:  
+If many stocks look almost the same to the GNN, can extra “name tags” about
+their place and role in the web help the model:
+
+- see real differences between them, and  
+- make better guesses about who will be risky, calm, or involved in the next
+  storm?
+
+---
+
+### 3.3 RQ3 – Temporal GNNs for Regime Dynamics
+
+**Research phrasing**
+
+> How do different spatiotemporal GNN architectures (e.g., static GNN + sequence
+>  model vs. integrated temporal message passing) compare in modeling regime
+>  dynamics, particularly in detecting regime switches and persistence on
+>  evolving market graphs with high‑dimensional node features?
+
+**Simple explanation**
+
+Question:  
+What is the best way for a model that sees the market web changing day by day
+to:
+
+- notice when the weather is about to change (regime switch), and  
+- understand how long each type of weather usually lasts?
+
+Should I:
+
+- first process each day’s web with a GNN and then feed the sequence into an
+  RNN/Transformer, or  
+- use one model that handles *time + graph* together from the start?
+
+---
+
+### 3.4 RQ4 – Graph “Foundation‑Style” Pretraining (stretch idea)
+
+**Research phrasing**
+
+> Can pretraining a graph neural network or graph transformer on large‑scale
+>  historical market graphs using self‑supervised objectives yield reusable
+>  node/graph representations that transfer effectively to multiple downstream
+>  tasks (regime detection, pair selection, volatility forecasting), in line
+>  with emerging graph foundation model paradigms?
+
+**Simple explanation**
+
+Question:  
+If I let a big GNN “read” years of market webs with no specific goal—just
+learning general patterns—will that give me a kind of *market brain* that I
+can reuse for many jobs (spotting regimes, picking pairs, predicting risk)
+without training from scratch every time?
+
+---
+
+## 4. How I Plan to Use This File
+
+- When I’m designing the **LoG course project** or my **thesis**:
+  - I pick 1–2 of the RQs above as the core.
+  - I use the *formal* phrasing in the proposal/paper.
+  - I use the *simple* phrasing to sanity‑check that I still understand what
+    the hell I’m doing.
+
+- I can extend this file with:
+  - A section for **pair‑GNN / pair health**,  
+  - Concrete datasets, baselines, and experiment sketches.
+
+This is my “reload the mental model in 5 minutes” note.
