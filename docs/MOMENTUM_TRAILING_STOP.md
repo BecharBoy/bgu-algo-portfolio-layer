@@ -1,7 +1,6 @@
 
 ***
 
-```markdown
 # 08_MOMENTUM_TRAILING_STOP.md
 
 ## What This Document Is
