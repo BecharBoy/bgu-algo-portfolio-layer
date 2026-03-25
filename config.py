@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 import os
 import pandas as pd
 
@@ -9,8 +9,8 @@ class Settings:
     ib_port: int
     ib_client_id: int
     db_connection_string: str
-    gemini_api_key: str
     universe: List[str]
+    gemini_api_key: Optional[str] = None
     trade_mode: str = "paper"
     max_concurrent_positions: int = 10
 
@@ -22,7 +22,7 @@ def load_settings() -> Settings:
         ib_port=int(os.environ["IB_PORT"]),
         ib_client_id=int(os.environ["IB_CLIENT_ID"]),
         db_connection_string=os.environ["DB_CONNECTION_STRING"],
-        gemini_api_key=os.environ["GEMINI_API_KEY"],
+        gemini_api_key=os.environ.get("GEMINI_API_KEY"),
         universe=_load_universe(),
     )
 
