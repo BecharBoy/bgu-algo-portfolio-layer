@@ -9,9 +9,12 @@ ext = Extension(
         "MathStats.cpp",
         "PairScanner.cpp",
     ],
-    include_dirs=[pybind11.get_include()],
-    extra_compile_args=["-std=c++17", "-O3", "-fopenmp"],
-    extra_link_args=["-fopenmp"],
+    include_dirs=[
+        pybind11.get_include(),
+        "eigen-5.0.0",
+    ],
+    extra_compile_args=["/std:c++17", "/O2", "/EHsc"],
+    extra_link_args=[],
     language="cpp",
 )
 

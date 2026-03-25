@@ -18,8 +18,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "strategies" / "cointegration"))
 
+
 from strategies.mean_reversion.meanreversion import MeanReversionMomentum
 from strategies.cointegration.StatArbStrategy import StatArbStrategy
+
 
 strategies = [
     MeanReversionMomentum(capital_allocation=0.50),
