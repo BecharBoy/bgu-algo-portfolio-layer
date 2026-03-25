@@ -6,7 +6,7 @@ from typing import Dict, List, Any
 class BaseStrategy(ABC):
     def __init__(self, name: str, capital_allocation: float):
         self.name = name
-        self.weight_allocation = capital_allocation
+        self.capital_allocation = capital_allocation
         # TODO: Add optional per-strategy config payload.
 
     @abstractmethod

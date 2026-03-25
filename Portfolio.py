@@ -10,7 +10,7 @@ from IB import IB_Connect
 from Strategy import BaseStrategy
 from Data_Feed import DataFeed
 import schemas
-import datetime
+from datetime import datetime, UTC
 from schemas import Signal
 logger = logging.getLogger(__name__)
 
@@ -233,52 +233,51 @@ class Portfolio:
                         })
                         logger.info(f"[FILL] Late fill on order_id={ib_order_id} captured and logged ✓")
 
-                    elif final_status == "PartiallyFilled":
-                        partial_trade = next(
-                        (t for t in self.ib.ib.trades()
-                         if t.order.orderId == ib_order_id), None
-                    )
-                        filled_so_far = int(partial_trade.orderStatus.filled) if partial_trade else 0
+                elif final_status == "PartiallyFilled":
+                    partial_trade = next(
+                    (t for t in self.ib.ib.trades()
+                     if t.order.orderId == ib_order_id), None
+                )
+                    filled_so_far = int(partial_trade.orderStatus.filled) if partial_trade else 0
 
-                        if filled_so_far > 0:
-                            # Log the original partial fill FIRST
-                            await self.db.log_trade_execution({
-                                "fill_id": str(uuid.uuid4()),
-                                "order_id": str(ib_order_id),
-                                "symbol": order["symbol"],
-                                "action": order["action"],
-                                "quantity": filled_so_far,
-                                "fill_price": partial_trade.orderStatus.avgFillPrice,
-                                "filled_at": datetime.now(datetime.timezone.utc).isoformat(),
-                            })
-                            logger.warning(f"[PARTIAL] Logged original partial: {filled_so_far} {order['symbol']}")
+                    if filled_so_far > 0:
+                        # Log the original partial fill FIRST
+                        await self.db.log_trade_execution({
+                            "fill_id": str(uuid.uuid4()),
+                            "order_id": str(ib_order_id),
+                            "symbol": order["symbol"],
+                            "action": order["action"],
+                            "quantity": filled_so_far,
+                            "fill_price": partial_trade.orderStatus.avgFillPrice,
+                            "filled_at": datetime.now(UTC).isoformat(),                        })
+                        logger.warning(f"[PARTIAL] Logged original partial: {filled_so_far} {order['symbol']}")
 
-                            # Then flatten
+                        # Then flatten
+                        logger.warning(
+                            f"[PARTIAL] order_id={ib_order_id}: "
+                            f"{filled_so_far}/{order['quantity']} {order['symbol']} filled "
+                            f"before cancel — flattening immediately."
+                        )
+                        flatten_result = await self.ib.flatten_position(
+                            symbol=order["symbol"],
+                            quantity=filled_so_far,
+                            action=order["action"],
+                        )
+                        flatten_fill = await self.ib.wait_for_order_fill(
+                            order_id=flatten_result["order_id"]
+                        )
+                        if flatten_fill:
+                            await self.db.log_trade_execution(flatten_fill)
                             logger.warning(
-                                f"[PARTIAL] order_id={ib_order_id}: "
-                                f"{filled_so_far}/{order['quantity']} {order['symbol']} filled "
-                                f"before cancel — flattening immediately."
+                                f"[FLATTEN] Fill logged: "
+                                f"{flatten_fill['action']} {flatten_fill['quantity']} "
+                                f"{flatten_fill['symbol']} @ {flatten_fill['fill_price']}"
                             )
-                            flatten_result = await self.ib.flatten_position(
-                                symbol=order["symbol"],
-                                quantity=filled_so_far,
-                                action=order["action"],
+                        else:
+                            logger.critical(
+                                f"[FLATTEN] Flatten order for {order['symbol']} did not confirm fill — "
+                                f"position may be open. Check TWS immediately."
                             )
-                            flatten_fill = await self.ib.wait_for_order_fill(
-                                order_id=flatten_result["order_id"]
-                            )
-                            if flatten_fill:
-                                await self.db.log_trade_execution(flatten_fill)
-                                logger.warning(
-                                    f"[FLATTEN] Fill logged: "
-                                    f"{flatten_fill['action']} {flatten_fill['quantity']} "
-                                    f"{flatten_fill['symbol']} @ {flatten_fill['fill_price']}"
-                                )
-                            else:
-                                logger.critical(
-                                    f"[FLATTEN] Flatten order for {order['symbol']} did not confirm fill — "
-                                    f"position may be open. Check TWS immediately."
-                                )
 
                 elif final_status in ("CancelTimeout", "NotFound"):
                     logger.critical(
