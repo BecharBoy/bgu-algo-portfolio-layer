@@ -1,191 +1,166 @@
-# strategies/cointegration/StatArbStrategy.py
+from __future__ import annotations
 
-import pandas as pd
-import numpy as np
 import uuid
 from datetime import datetime, timezone
-from typing import List, Dict, Any
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
 from Strategy import BaseStrategy
-from Wrapper import Wrapper
+
+# Import the compiled C++ extension.
+# Run: cd strategies/cointegration && python setup.py build_ext --inplace
+try:
+    import cointegration_engine
+    _CPP_AVAILABLE = True
+except ImportError:
+    _CPP_AVAILABLE = False
 
 
 class StatArbStrategy(BaseStrategy):
     def __init__(
         self,
         name: str = "CointegrationArb",
-        capital_allocation: float = 0.5,
+        capital_allocation: float = 0.3,
         zscore_entry: float = 2.0,
         zscore_exit: float = 0.5,
         lookback_window: int = 60,
-    ):
+        num_threads: int = 6,
+        min_correlation: float = 0.85,
+    ) -> None:
         super().__init__(name, capital_allocation)
-        self.wrapper = Wrapper(num_threads=6, min_correlation=0.85)
         self.zscore_entry = zscore_entry
         self.zscore_exit = zscore_exit
         self.lookback_window = lookback_window
+        self.num_threads = num_threads
+        self.min_correlation = min_correlation
 
     async def generate_signals(
         self,
-        market_data: Dict[str, pd.DataFrame],
-        current_positions: Dict[str, Any],
-    ) -> List[Dict]:
-
+        market_data: dict[str, pd.DataFrame],
+        current_positions: dict[str, Any],  # dict[str, Position] from portfolio
+    ) -> list[dict]:
+        if not _CPP_AVAILABLE:
+            raise RuntimeError(
+                "cointegration_engine C++ extension not found. "
+                "Run: cd strategies/cointegration && python setup.py build_ext --inplace"
+            )
         if len(market_data) < 2:
             return []
 
-        cointegrated_pairs = await self.wrapper.run_cointegration_scan(market_data)
+        # --- Build price matrix for C++ scanner ---
+        tickers = list(market_data.keys())
+        min_len = min(len(df) for df in market_data.values())
+        if min_len < self.lookback_window:
+            return []
+
+        price_matrix = [
+            market_data[t]["Close"].values[-self.lookback_window:].tolist()
+            for t in tickers
+        ]
+
+        # --- Call C++ engine (releases GIL internally) ---
+        cointegrated_pairs = cointegration_engine.run_cpp_scan(
+            tickers=tickers,
+            price_matrix=price_matrix,
+            num_threads=self.num_threads,
+            min_correlation=self.min_correlation,
+        )
 
         if not cointegrated_pairs:
             return []
 
-        signals: List[Dict] = []
+        # --- Translate Position dataclass → dict for internal use ---
+        # portfolio.get_positions() returns dict[str, Position]
+        # Position has .quantity (positive=long, negative=short)
+        pos_map: dict[str, int] = {}
+        for sym, pos in current_positions.items():
+            qty = pos.quantity if hasattr(pos, "quantity") else pos.get("quantity", 0)
+            pos_map[sym] = qty
+
+        signals: list[dict] = []
 
         for pair in cointegrated_pairs:
-            stock_x = pair["stock_x"]
-            stock_y = pair["stock_y"]
-            beta    = pair["hedge_ratio"]
-            alpha   = pair.get("alpha", 0.0)
+            stock_x = pair.stock_x
+            stock_y = pair.stock_y
+            beta = pair.hedge_ratio
 
             if stock_x not in market_data or stock_y not in market_data:
                 continue
 
-            prices_x = market_data[stock_x]["Close"].values
-            prices_y = market_data[stock_y]["Close"].values
+            prices_x = market_data[stock_x]["Close"].values[-self.lookback_window:]
+            prices_y = market_data[stock_y]["Close"].values[-self.lookback_window:]
 
-            min_len = min(len(prices_x), len(prices_y))
-            if min_len < self.lookback_window:
-                continue
-
-            prices_x = prices_x[-self.lookback_window:]
-            prices_y = prices_y[-self.lookback_window:]
-
-            spread = prices_y - beta * prices_x - alpha
-
+            spread = prices_y - beta * prices_x
             spread_mean = np.mean(spread)
-            spread_std  = np.std(spread, ddof=1)
-
+            spread_std = np.std(spread, ddof=1)
             if spread_std == 0.0:
                 continue
 
             zscore = (spread[-1] - spread_mean) / spread_std
-
-            pair_is_open = self._is_pair_already_open(pair, current_positions)
+            pair_is_open = stock_x in pos_map or stock_y in pos_map
 
             if pair_is_open:
                 if abs(zscore) < self.zscore_exit:
-                    # Exit BOTH legs — close whatever side each symbol is on.
-                    # We determine close direction by checking current_positions.
-                    # If a symbol is long (net_quantity > 0) we SELL to close; if short we BUY.
                     pair_id = f"{stock_x}_{stock_y}_exit"
                     for symbol in (stock_x, stock_y):
-                        pos = current_positions.get(symbol)
-                        if pos is None:
+                        qty = pos_map.get(symbol, 0)
+                        if qty == 0:
                             continue
-                        net_qty = pos.get("net_quantity", 0)
-                        close_action = "SELL" if net_qty > 0 else "BUY"
-                        signals.append(self._build_signal_leg(
+                        close_action = "SELL" if qty > 0 else "BUY"
+                        signals.append(self._build_leg(
                             symbol=symbol,
                             action=close_action,
-                            price=market_data[symbol]["Close"].iloc[-1],
+                            price=float(market_data[symbol]["Close"].iloc[-1]),
                             reason="pair_exit_reversion",
-                            metadata={
-                                "zscore": zscore,
-                                "hedge_ratio": beta,
-                                "pair_id": pair_id,
-                                "pair_partner": stock_y if symbol == stock_x else stock_x,
-                            },
+                            metadata={"zscore": zscore, "hedge_ratio": beta, "pair_id": pair_id},
                         ))
                 continue
 
-            # Shared pair_id tags both legs so aggregation can protect them atomically.
             pair_id = str(uuid.uuid4())
 
             if zscore > self.zscore_entry:
-                # Spread too high: Y overpriced vs X → SELL Y, BUY X
-                signals.extend([
-                    self._build_signal_leg(
-                        symbol=stock_y,
-                        action="SELL",
-                        price=market_data[stock_y]["Close"].iloc[-1],
-                        reason="stat_arb_spread_high",
-                        metadata={
-                            "zscore": zscore,
-                            "hedge_ratio": beta,
-                            "pair_leg": "short",
-                            "pair_id": pair_id,
-                            "pair_partner": stock_x,
-                        }
-                    ),
-                    self._build_signal_leg(
-                        symbol=stock_x,
-                        action="BUY",
-                        price=market_data[stock_x]["Close"].iloc[-1],
-                        reason="stat_arb_spread_high",
-                        metadata={
-                            "zscore": zscore,
-                            "hedge_ratio": beta,
-                            "pair_leg": "long",
-                            "pair_id": pair_id,
-                            "pair_partner": stock_y,
-                        }
-                    ),
-                ])
-
+                # Y overpriced vs X → SELL Y, BUY X
+                signals += self._make_entry(stock_y, "SELL", stock_x, "BUY",
+                                            market_data, beta, zscore, pair_id,
+                                            "stat_arb_spread_high")
             elif zscore < -self.zscore_entry:
-                # Spread too low: Y underpriced vs X → BUY Y, SELL X
-                signals.extend([
-                    self._build_signal_leg(
-                        symbol=stock_y,
-                        action="BUY",
-                        price=market_data[stock_y]["Close"].iloc[-1],
-                        reason="stat_arb_spread_low",
-                        metadata={
-                            "zscore": zscore,
-                            "hedge_ratio": beta,
-                            "pair_leg": "long",
-                            "pair_id": pair_id,
-                            "pair_partner": stock_x,
-                        }
-                    ),
-                    self._build_signal_leg(
-                        symbol=stock_x,
-                        action="SELL",
-                        price=market_data[stock_x]["Close"].iloc[-1],
-                        reason="stat_arb_spread_low",
-                        metadata={
-                            "zscore": zscore,
-                            "hedge_ratio": beta,
-                            "pair_leg": "short",
-                            "pair_id": pair_id,
-                            "pair_partner": stock_y,
-                        }
-                    ),
-                ])
+                # Y underpriced vs X → BUY Y, SELL X
+                signals += self._make_entry(stock_y, "BUY", stock_x, "SELL",
+                                            market_data, beta, zscore, pair_id,
+                                            "stat_arb_spread_low")
 
         return signals
 
-    def _build_signal_leg(
+    def _make_entry(
         self,
-        symbol: str,
-        action: str,
-        price: float,
-        reason: str,
-        metadata: Dict[str, Any],
-    ) -> Dict:
+        sym_y: str, action_y: str,
+        sym_x: str, action_x: str,
+        market_data: dict[str, pd.DataFrame],
+        beta: float, zscore: float, pair_id: str, reason: str,
+    ) -> list[dict]:
+        return [
+            self._build_leg(sym_y, action_y, float(market_data[sym_y]["Close"].iloc[-1]),
+                            reason, {"zscore": zscore, "hedge_ratio": beta,
+                                     "pair_leg": "short" if action_y == "SELL" else "long",
+                                     "pair_id": pair_id, "pair_partner": sym_x}),
+            self._build_leg(sym_x, action_x, float(market_data[sym_x]["Close"].iloc[-1]),
+                            reason, {"zscore": zscore, "hedge_ratio": beta,
+                                     "pair_leg": "long" if action_x == "BUY" else "short",
+                                     "pair_id": pair_id, "pair_partner": sym_y}),
+        ]
+
+    def _build_leg(self, symbol: str, action: str, price: float,
+                   reason: str, metadata: dict) -> dict:
         return {
             "signal_id":       str(uuid.uuid4()),
             "timestamp":       datetime.now(timezone.utc).isoformat(),
             "symbol":          symbol,
             "action":          action,
             "strategy":        self.name,
+            "weight_allocation": self.capital_allocation,
             "price_reference": price,
             "reason":          reason,
             "metadata":        metadata,
         }
-
-    def _is_pair_already_open(
-        self,
-        pair: Dict[str, Any],
-        current_positions: Dict[str, Any],
-    ) -> bool:
-        return pair["stock_x"] in current_positions or pair["stock_y"] in current_positions
