@@ -41,7 +41,14 @@ def compute_metrics(
     total_return = 0.0 if starting_equity == 0 else (ending_equity / starting_equity) - 1.0
 
     num_periods = max(len(curve) - 1, 1)
-    annualized_return = (ending_equity / starting_equity) ** (252.0 / num_periods) - 1.0 if starting_equity > 0 else 0.0
+    if starting_equity > 0 and num_periods > 0:
+        ratio = ending_equity / starting_equity
+        annualized_return = math.copysign(
+            abs(ratio) ** (252.0 / num_periods) - 1.0,
+            ratio - 1.0
+        )
+    else:
+        annualized_return = 0.0
     calmar = 0.0 if max_drawdown == 0 else annualized_return / abs(max_drawdown)
 
     closed_trades = [trade for trade in trade_log if trade.get("realized_pnl") is not None]

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime
 
 import asyncio
 import json
@@ -37,8 +38,8 @@ LOOKBACK_DAYS = 252            # warmup aligned with engine window
 INITIAL_CASH  = 100_000.0
 COMMISSION    = 0.001
 SLIPPAGE      = 0.0005
-RESULTS_DIR   = Path(__file__).resolve().parent / "results"
-
+RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+RESULTS_DIR = Path(__file__).resolve().parent / "results" / RUN_ID
 
 def _load_default_tickers() -> list[str]:
     tickers_path = Path(__file__).resolve().parent.parent / "tickers.csv"
@@ -72,9 +73,7 @@ async def main() -> None:
     if not data:
         raise RuntimeError("No market data loaded — has bootstrap_history_job run?")
 
-    from strategies.mean_reversion.meanreversion import MeanReversionMomentum
 
-    strategies = [MeanReversionMomentum(capital_allocation=0.30)]
 
     portfolio = Portfolio(
         initial_cash=INITIAL_CASH,
