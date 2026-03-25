@@ -71,7 +71,7 @@ async def run() -> None:
         ib=ib,
         datafeed=data_feed,
     )
-    portfolio.add_strategy(MeanReversionMomentum(weight_allocation=0.5))
+    portfolio.add_strategy(MeanReversionMomentum(capital_allocation=0.5))
     portfolio.add_strategy(StatArbStrategy(weight_allocation=0.5))
 
     await bootstrap_history_job(data_feed, db)

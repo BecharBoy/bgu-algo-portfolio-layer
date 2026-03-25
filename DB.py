@@ -62,25 +62,25 @@ class DB:
         
         if not trade_data:
             return False
-        
+
         rows = [(
-        trade_data["fill_id"],
-        trade_data["order_id"],
-        trade_data["symbol"],
-        trade_data["quantity"],
-        trade_data["fill_price"],
-        trade_data["filled_at"],   
+            trade_data["fill_id"],
+            trade_data["order_id"],
+            trade_data["symbol"],
+            trade_data["action"],
+            trade_data["quantity"],
+            trade_data["fill_price"],
+            trade_data["filled_at"],
         )]
         async with self.pool.acquire() as conn:
             await conn.executemany(
-            """
-            INSERT INTO fills
-                (fill_id, order_id, symbol, quantity, fill_price, filled_at)
-            VALUES
-                ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (order_id) DO NOTHING
-            """,
-            rows
+                """
+                INSERT INTO fills
+                    (fill_id, order_id, symbol, action, quantity, fill_price, filled_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (order_id) DO NOTHING
+                """,
+                rows
             )
 
     async def update_account_snapshot(self, nlv: float, cash: float):
@@ -105,10 +105,11 @@ class DB:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT symbol, SUM(quantity) as net_quantity
+                SELECT symbol,
+                       SUM(CASE WHEN action = 'BUY' THEN quantity ELSE -quantity END) AS net_quantity
                 FROM fills
                 GROUP BY symbol
-                HAVING SUM(quantity) != 0
+                HAVING SUM(CASE WHEN action = 'BUY' THEN quantity ELSE -quantity END) != 0
                 """
             )
         return [dict(row) for row in rows]
@@ -157,6 +158,7 @@ class DB:
                     fill_id     TEXT        PRIMARY KEY,
                     order_id    TEXT        REFERENCES orders(order_id),
                     symbol      TEXT        NOT NULL,
+                    action      TEXT        NOT NULL,
                     quantity    INT         NOT NULL,
                     fill_price  FLOAT       NOT NULL,
                     filled_at   TIMESTAMPTZ NOT NULL
@@ -223,7 +225,18 @@ class DB:
             """,
             ticker, lookback_days
         )
-        return [dict(row) for row in rows]
+        return [
+            {
+                "ticker": row["ticker"],
+                "date": row["date"],
+                "Open": row["open"],
+                "High": row["high"],
+                "Low": row["low"],
+                "Close": row["close"],
+                "Volume": row["volume"],
+            }
+            for row in rows
+        ]
 
     async def save_orders(self, orders: List[Dict]):
         if self.pool is None:

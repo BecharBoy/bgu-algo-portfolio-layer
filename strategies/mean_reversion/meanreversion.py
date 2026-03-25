@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 
 
 class MeanReversionMomentum(BaseStrategy):
-    def __init__(self, name: str = "MeanReversionMomentum", weight_allocation: float = 0.5):
-        super().__init__(name, weight_allocation)
+    def __init__(self, name: str = "MeanReversionMomentum", capital_allocation: float = 0.5):
+        super().__init__(name, capital_allocation)
         self.sma_window = 30
         self.rsi_period = 14
         self.atr_period = 14
@@ -169,5 +169,4 @@ class MeanReversionMomentum(BaseStrategy):
             "strategy":          self.name,
             "price_reference":   current_price,
             "reason":            reason,
-            "weight_allocation": self.weight_allocation,
         }
