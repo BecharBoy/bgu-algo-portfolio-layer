@@ -30,16 +30,13 @@ def setup_logging() -> None:
     fmt = "%(asctime)s %(levelname)-8s %(name)s — %(message)s"
     datefmt = "%H:%M:%S"
 
-    # Root logger
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
-    # Console handler
     console = logging.StreamHandler()
     console.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
     root.addHandler(console)
 
-    # Daily file handler
     file_handler = logging.FileHandler(log_filename, mode="a", encoding="utf-8")
     file_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
     root.addHandler(file_handler)
@@ -72,7 +69,7 @@ async def run() -> None:
         datafeed=data_feed,
     )
     portfolio.add_strategy(MeanReversionMomentum(capital_allocation=0.5))
-    portfolio.add_strategy(StatArbStrategy(weight_allocation=0.5))
+    portfolio.add_strategy(StatArbStrategy(capital_allocation=0.5))
 
     await bootstrap_history_job(data_feed, db)
     await daily_incremental_update_job(data_feed)

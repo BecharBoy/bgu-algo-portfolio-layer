@@ -13,12 +13,12 @@ class StatArbStrategy(BaseStrategy):
     def __init__(
         self,
         name: str = "CointegrationArb",
-        weight_allocation: float = 0.5,
+        capital_allocation: float = 0.5,
         zscore_entry: float = 2.0,
         zscore_exit: float = 0.5,
         lookback_window: int = 60,
     ):
-        super().__init__(name, weight_allocation)
+        super().__init__(name, capital_allocation)
         self.wrapper = Wrapper(num_threads=6, min_correlation=0.85)
         self.zscore_entry = zscore_entry
         self.zscore_exit = zscore_exit
@@ -73,11 +73,32 @@ class StatArbStrategy(BaseStrategy):
 
             if pair_is_open:
                 if abs(zscore) < self.zscore_exit:
-                    signals.append(self._build_pair_signal(
-                        stock_x, stock_y, "SELL", "SELL",
-                        market_data, beta, zscore, "pair_exit_reversion"
-                    ))
+                    # Exit BOTH legs — close whatever side each symbol is on.
+                    # We determine close direction by checking current_positions.
+                    # If a symbol is long (net_quantity > 0) we SELL to close; if short we BUY.
+                    pair_id = f"{stock_x}_{stock_y}_exit"
+                    for symbol in (stock_x, stock_y):
+                        pos = current_positions.get(symbol)
+                        if pos is None:
+                            continue
+                        net_qty = pos.get("net_quantity", 0)
+                        close_action = "SELL" if net_qty > 0 else "BUY"
+                        signals.append(self._build_signal_leg(
+                            symbol=symbol,
+                            action=close_action,
+                            price=market_data[symbol]["Close"].iloc[-1],
+                            reason="pair_exit_reversion",
+                            metadata={
+                                "zscore": zscore,
+                                "hedge_ratio": beta,
+                                "pair_id": pair_id,
+                                "pair_partner": stock_y if symbol == stock_x else stock_x,
+                            },
+                        ))
                 continue
+
+            # Shared pair_id tags both legs so aggregation can protect them atomically.
+            pair_id = str(uuid.uuid4())
 
             if zscore > self.zscore_entry:
                 # Spread too high: Y overpriced vs X → SELL Y, BUY X
@@ -91,6 +112,7 @@ class StatArbStrategy(BaseStrategy):
                             "zscore": zscore,
                             "hedge_ratio": beta,
                             "pair_leg": "short",
+                            "pair_id": pair_id,
                             "pair_partner": stock_x,
                         }
                     ),
@@ -103,6 +125,7 @@ class StatArbStrategy(BaseStrategy):
                             "zscore": zscore,
                             "hedge_ratio": beta,
                             "pair_leg": "long",
+                            "pair_id": pair_id,
                             "pair_partner": stock_y,
                         }
                     ),
@@ -120,6 +143,7 @@ class StatArbStrategy(BaseStrategy):
                             "zscore": zscore,
                             "hedge_ratio": beta,
                             "pair_leg": "long",
+                            "pair_id": pair_id,
                             "pair_partner": stock_x,
                         }
                     ),
@@ -132,6 +156,7 @@ class StatArbStrategy(BaseStrategy):
                             "zscore": zscore,
                             "hedge_ratio": beta,
                             "pair_leg": "short",
+                            "pair_id": pair_id,
                             "pair_partner": stock_y,
                         }
                     ),
@@ -148,35 +173,15 @@ class StatArbStrategy(BaseStrategy):
         metadata: Dict[str, Any],
     ) -> Dict:
         return {
-            "signal_id":         str(uuid.uuid4()),
-            "timestamp":         datetime.now(timezone.utc).isoformat(),
-            "symbol":            symbol,
-            "action":            action,
-            "strategy":          self.name,
-            "price_reference":   price,
-            "reason":            reason,
-            "weight_allocation": self.weight_allocation,
-            "metadata":          metadata,
+            "signal_id":       str(uuid.uuid4()),
+            "timestamp":       datetime.now(timezone.utc).isoformat(),
+            "symbol":          symbol,
+            "action":          action,
+            "strategy":        self.name,
+            "price_reference": price,
+            "reason":          reason,
+            "metadata":        metadata,
         }
-
-    def _build_pair_signal(
-        self,
-        stock_x: str,
-        stock_y: str,
-        action_x: str,
-        action_y: str,
-        market_data: Dict,
-        beta: float,
-        zscore: float,
-        reason: str,
-    ) -> Dict:
-        return self._build_signal_leg(
-            symbol=stock_y,
-            action=action_y,
-            price=market_data[stock_y]["Close"].iloc[-1],
-            reason=reason,
-            metadata={"zscore": zscore, "hedge_ratio": beta, "pair_partner": stock_x},
-        )
 
     def _is_pair_already_open(
         self,

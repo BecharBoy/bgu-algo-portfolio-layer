@@ -177,6 +177,13 @@ class DB:
             );
         """)
 
+            # ── Migration guard: add action column to fills if it does not exist.
+            # Required for databases created before this column was introduced.
+            # ALTER TABLE ... ADD COLUMN IF NOT EXISTS is idempotent and safe to run every startup.
+            await conn.execute("""
+                ALTER TABLE fills ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'BUY';
+            """)
+
     async def upsert_ohlcv_bars(self, ticker: str, bars: List[Dict]):
         if self.pool is None:
             raise RuntimeError("DB not connected — call connect() first")
@@ -228,11 +235,11 @@ class DB:
         return [
             {
                 "ticker": row["ticker"],
-                "date": row["date"],
-                "Open": row["open"],
-                "High": row["high"],
-                "Low": row["low"],
-                "Close": row["close"],
+                "date":   row["date"],
+                "Open":   row["open"],
+                "High":   row["high"],
+                "Low":    row["low"],
+                "Close":  row["close"],
                 "Volume": row["volume"],
             }
             for row in rows
