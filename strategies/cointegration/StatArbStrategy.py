@@ -9,8 +9,6 @@ import pandas as pd
 
 from Strategy import BaseStrategy
 
-# Import the compiled C++ extension.
-# Run: cd strategies/cointegration && python setup.py build_ext --inplace
 try:
     import cointegration_engine
     _CPP_AVAILABLE = True
@@ -22,7 +20,7 @@ class StatArbStrategy(BaseStrategy):
     def __init__(
         self,
         name: str = "CointegrationArb",
-        capital_allocation: float = 0.3,
+        capital_allocation: float = 0.15,
         zscore_entry: float = 2.0,
         zscore_exit: float = 0.5,
         lookback_window: int = 60,
@@ -39,7 +37,7 @@ class StatArbStrategy(BaseStrategy):
     async def generate_signals(
         self,
         market_data: dict[str, pd.DataFrame],
-        current_positions: dict[str, Any],   # dict[str, Position] from portfolio
+        current_positions: dict[str, Any],   # ONLY CointegrationArb-owned positions
     ) -> list[dict]:
         if not _CPP_AVAILABLE:
             raise RuntimeError(
@@ -49,7 +47,6 @@ class StatArbStrategy(BaseStrategy):
         if len(market_data) < 2:
             return []
 
-        # --- Build price matrix for C++ scanner ---
         tickers = list(market_data.keys())
         min_len = min(len(df) for df in market_data.values())
         if min_len < self.lookback_window:
@@ -60,7 +57,6 @@ class StatArbStrategy(BaseStrategy):
             for t in tickers
         ]
 
-        # --- Call C++ engine (releases GIL internally) ---
         cointegrated_pairs = cointegration_engine.run_cpp_scan(
             tickers=tickers,
             price_matrix=price_matrix,
@@ -71,12 +67,18 @@ class StatArbStrategy(BaseStrategy):
         if not cointegrated_pairs:
             return []
 
-        # --- Build pos_map: symbol -> net quantity (int) ---
-        # get_positions() now returns dict[str, Position] with .quantity attribute
-        pos_map: dict[str, int] = {}
+        # Build pos_map: symbol -> (net_quantity, pair_id_that_opened_it)
+        # Only positions owned by this strategy are in current_positions.
+        pos_map:     dict[str, int]  = {}
+        pair_id_map: dict[str, str]  = {}   # symbol -> pair_id stored at entry
+
         for sym, pos in current_positions.items():
             qty = pos.quantity if hasattr(pos, "quantity") else pos.get("net_quantity", 0)
             pos_map[sym] = qty
+            if hasattr(pos, "metadata") and pos.metadata:
+                pair_id_map[sym] = pos.metadata.get("pair_id", "")
+            elif isinstance(pos, dict):
+                pair_id_map[sym] = (pos.get("metadata") or {}).get("pair_id", "")
 
         signals: list[dict] = []
 
@@ -99,18 +101,28 @@ class StatArbStrategy(BaseStrategy):
 
             zscore = (spread[-1] - spread_mean) / spread_std
 
-            # A pair is considered open when EITHER leg has a non-zero position
             qty_x = pos_map.get(stock_x, 0)
             qty_y = pos_map.get(stock_y, 0)
             pair_is_open = (qty_x != 0) or (qty_y != 0)
 
             if pair_is_open:
-                # Exit when spread has reverted toward the mean
+                # ── Validate pair_id: only close this pair's own legs ─────────
+                # A leg opened by a different scanner hit (different pair_id)
+                # must not be closed by this pair's z-score.
+                canonical_pair_id = self._canonical_pair_id(stock_x, stock_y)
+                stored_x = pair_id_map.get(stock_x, "")
+                stored_y = pair_id_map.get(stock_y, "")
+                # Either leg must have a matching canonical_pair_id OR a UUID
+                # that we regenerated for the same canonical pair.
+                # We match on canonical form (sorted tickers) stored at entry.
+                open_pair_canonical = stored_x or stored_y
+                if open_pair_canonical and open_pair_canonical != canonical_pair_id:
+                    # This scanner hit refers to a different pair — skip.
+                    continue
+
                 if abs(zscore) < self.zscore_exit:
-                    pair_id = f"{stock_x}_{stock_y}_exit"
                     for symbol, qty in ((stock_x, qty_x), (stock_y, qty_y)):
                         if qty == 0:
-                            # Leg was never opened (entry rejected) -- skip
                             continue
                         close_action = "SELL" if qty > 0 else "BUY"
                         signals.append(self._build_leg(
@@ -121,28 +133,26 @@ class StatArbStrategy(BaseStrategy):
                             metadata={
                                 "zscore":       zscore,
                                 "hedge_ratio":  beta,
-                                "pair_id":      pair_id,
+                                "pair_id":      canonical_pair_id,
                                 "pair_partner": stock_y if symbol == stock_x else stock_x,
                             },
-                            is_exit=True,   # <-- tells portfolio NOT to open a new position
+                            is_exit=True,
                         ))
-                # Spread still wide -- hold
+                # Spread still wide — hold
                 continue
 
-            # --- New entry ---
-            pair_id = str(uuid.uuid4())
+            # ── New entry ─────────────────────────────────────────────────────
+            canonical_pair_id = self._canonical_pair_id(stock_x, stock_y)
 
             if zscore > self.zscore_entry:
-                # Y overpriced vs X  -->  SELL Y (short), BUY X (long)
                 signals += self._make_entry(
                     stock_y, "SELL", stock_x, "BUY",
-                    market_data, beta, zscore, pair_id, "stat_arb_spread_high",
+                    market_data, beta, zscore, canonical_pair_id, "stat_arb_spread_high",
                 )
             elif zscore < -self.zscore_entry:
-                # Y underpriced vs X  -->  BUY Y (long), SELL X (short)
                 signals += self._make_entry(
                     stock_y, "BUY", stock_x, "SELL",
-                    market_data, beta, zscore, pair_id, "stat_arb_spread_low",
+                    market_data, beta, zscore, canonical_pair_id, "stat_arb_spread_low",
                 )
 
         return signals
@@ -150,6 +160,16 @@ class StatArbStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _canonical_pair_id(a: str, b: str) -> str:
+        """
+        Deterministic pair identifier: always sorted alphabetically.
+        BAC_MSFT and MSFT_BAC both resolve to 'BAC_MSFT'.
+        This ensures the pair_id stored at entry always matches the one
+        generated at exit for the same pair, regardless of scanner order.
+        """
+        return "_".join(sorted([a, b]))
 
     def _make_entry(
         self,
@@ -160,8 +180,7 @@ class StatArbStrategy(BaseStrategy):
     ) -> list[dict]:
         return [
             self._build_leg(
-                symbol=sym_y,
-                action=action_y,
+                symbol=sym_y, action=action_y,
                 price=float(market_data[sym_y]["Close"].iloc[-1]),
                 reason=reason,
                 metadata={
@@ -174,8 +193,7 @@ class StatArbStrategy(BaseStrategy):
                 is_exit=False,
             ),
             self._build_leg(
-                symbol=sym_x,
-                action=action_x,
+                symbol=sym_x, action=action_x,
                 price=float(market_data[sym_x]["Close"].iloc[-1]),
                 reason=reason,
                 metadata={
@@ -208,5 +226,5 @@ class StatArbStrategy(BaseStrategy):
             "price_reference":   price,
             "reason":            reason,
             "metadata":          metadata,
-            "is_exit":           is_exit,   # consumed by portfolio.size_signal()
+            "is_exit":           is_exit,
         }

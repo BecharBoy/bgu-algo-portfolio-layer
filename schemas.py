@@ -11,6 +11,7 @@ class Signal(TypedDict, total=False):
     price_reference: float
     reason: str
     metadata: Dict[str, Any]
+    is_exit: bool
 
 
 class OrderIntent(TypedDict, total=False):
@@ -41,7 +42,6 @@ def validate_order_intent(order: Dict[str, Any]) -> bool:
     required_keys = {"order_id", "strategy", "symbol", "action", "quantity", "order_type", "tif"}
     if not required_keys.issubset(order.keys()):
         return False
-    # CointegrationArb is the runtime name of StatArbStrategy
     allowed_strategies = {"MeanReversionMomentum", "StatArbStrategy", "CointegrationArb"}
     if order["strategy"] not in allowed_strategies:
         return False
@@ -66,23 +66,35 @@ def aggregate_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Cross-strategy conflict resolver with pair-integrity protection.
 
-    Step 1 — resolve per-symbol conflicts across strategies (same as before).
-    Step 2 — enforce pair integrity: if any leg of a stat-arb pair was dropped
-              in step 1, drop the partner leg too. A half-pair is naked exposure.
+    KEY CHANGE: exit signals (is_exit=True) are ALWAYS passed through and
+    never participate in conflict resolution. Only new entry signals from
+    different strategies conflict if they disagree on direction.
 
-    Pair membership is identified by metadata.pair_id, which StatArbStrategy
-    stamps on both legs of every entry and exit signal.
+    Step 1 — separate exits from entries.
+    Step 2 — resolve per-symbol direction conflicts among entries only.
+    Step 3 — enforce pair integrity on entries: if one leg was dropped,
+              drop the partner leg too.
+    Step 4 — recombine exits + surviving entries.
     """
-    # ── Step 1: per-symbol cross-strategy conflict resolution ────────────────
-    by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    exits:   List[Dict[str, Any]] = []
+    entries: List[Dict[str, Any]] = []
+
     for sig in signals:
+        if sig.get("is_exit"):
+            exits.append(sig)
+        else:
+            entries.append(sig)
+
+    # ── Step 2: per-symbol cross-strategy conflict resolution (entries only) ─
+    by_symbol: Dict[str, List[Dict[str, Any]]] = {}
+    for sig in entries:
         sym = sig.get("symbol")
         if not sym:
             continue
         by_symbol.setdefault(sym, []).append(sig)
 
-    result: List[Dict[str, Any]] = []
-    dropped_symbols: set = set()
+    result:          List[Dict[str, Any]] = []
+    dropped_symbols: set                  = set()
 
     for symbol, sym_signals in by_symbol.items():
         actions = {s["action"] for s in sym_signals if "action" in s}
@@ -96,17 +108,9 @@ def aggregate_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         result.append(sym_signals[0])
 
-    # ── Step 2: pair integrity — drop partner leg if one leg was dropped ─────
-    # Collect all pair_ids that are now incomplete (one leg dropped, one kept).
-    kept_pair_ids: Dict[str, List[Dict]] = {}
-    for sig in result:
-        pid = (sig.get("metadata") or {}).get("pair_id")
-        if pid:
-            kept_pair_ids.setdefault(pid, []).append(sig)
-
-    # Find pair_ids where a partner was in dropped_symbols
+    # ── Step 3: pair integrity among entries ─────────────────────────────────
     orphaned_pair_ids: set = set()
-    for sig in signals:
+    for sig in entries:
         if sig.get("symbol") in dropped_symbols:
             pid = (sig.get("metadata") or {}).get("pair_id")
             if pid:
@@ -119,8 +123,9 @@ def aggregate_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if (s.get("metadata") or {}).get("pair_id") not in orphaned_pair_ids
         ]
         logging.warning(
-            f"aggregate_signals: dropped {before - len(result)} orphaned pair leg(s) "
+            f"aggregate_signals: dropped {before - len(result)} orphaned entry leg(s) "
             f"for pair_ids={orphaned_pair_ids} to preserve pair integrity."
         )
 
-    return result
+    # ── Step 4: exits always pass through ────────────────────────────────────
+    return exits + result
