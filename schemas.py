@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, TypedDict
 import logging
 
+
 class Signal(TypedDict, total=False):
     signal_id: str
     timestamp: str
@@ -93,8 +94,8 @@ def aggregate_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     Groups all signals by symbol. If two strategies disagree on
     direction for the same symbol (one BUY, one SELL), both are
     dropped — we do not trade a symbol where strategies conflict.
-    If both agree on direction, keep the one with the highest
-    weight_allocation (proxy for confidence).
+    If both agree on direction, keep the first signal seen
+    (arbitrary but stable tiebreaker when strategies agree).
 
     This prevents the system from placing both a BUY and a SELL
     for the same symbol in the same cycle, which would waste
@@ -124,9 +125,7 @@ def aggregate_signals(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             )
             continue
 
-        # No conflict: keep the signal with the highest weight_allocation
-        # (falls back to 0.0 if key is missing, so all signals are still valid)
-        best = max(sym_signals, key=lambda s: s.get("weight_allocation", 0.0))
-        result.append(best)
+        # No conflict: keep the first signal seen (stable tiebreaker)
+        result.append(sym_signals[0])
 
     return result

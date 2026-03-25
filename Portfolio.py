@@ -13,6 +13,11 @@ import schemas
 
 logger = logging.getLogger(__name__)
 
+# Fraction of each strategy's capital allocation used per trade.
+# Each order notional = nlv * strategy.capital_allocation * TRADE_WEIGHT
+# This ensures no single trade ever consumes more than 15% of a strategy's budget.
+TRADE_WEIGHT = 0.15
+
 
 class Portfolio:
 
@@ -24,9 +29,12 @@ class Portfolio:
         self.strategies: List[BaseStrategy] = []
         # Populated by data_quality_job before run_cycle; if None, fetch fresh.
         self._cached_bars: Dict[str, pd.DataFrame] | None = None
+        # Mapping from strategy.name -> capital_allocation; populated by add_strategy().
+        self._strategy_capital_allocations: Dict[str, float] = {}
 
     def add_strategy(self, strategy: BaseStrategy) -> None:
         self.strategies.append(strategy)
+        self._strategy_capital_allocations[strategy.name] = strategy.capital_allocation
 
     def _apply_risk_management(self, signals: List[Dict]) -> List[Dict]:
         # --- 1. Conflict resolution: opposing signals on same ticker cancel both ---
@@ -48,12 +56,6 @@ class Portfolio:
         if len(signals) > max_positions:
             signals = signals[:max_positions]
             logger.warning(f"[RISK] Capped signals to {max_positions}")
-
-        # --- 3. Per-signal weight cap: never > 20% NLV in one ticker ---
-        for sig in signals:
-            if sig.get("weight_allocation", 0) > 0.20:
-                sig["weight_allocation"] = 0.20
-                logger.warning(f"[RISK] Capped weight for {sig['symbol']} to 0.20")
 
         return signals
 
@@ -129,7 +131,8 @@ class Portfolio:
             await self.db.update_account_snapshot(nlv=nlv, cash=cash)
             return
 
-        clean_signals = schemas.deduplicate_signals(raw_signals)
+        aggregated_signals = schemas.aggregate_signals(raw_signals)
+        clean_signals = schemas.deduplicate_signals(aggregated_signals)
         clean_signals = self._apply_risk_management(clean_signals)
         logger.info(f"[STRATEGY] {len(clean_signals)} clean signal(s) after risk management.")
 
@@ -141,7 +144,14 @@ class Portfolio:
             if not price:
                 logger.error(f"[ORDER] No reference price for {ticker} — skipping signal.")
                 continue
-            quantity = floor((nlv * signal["weight_allocation"]) / price)
+
+            strategy_name = signal["strategy"]
+            strategy_capital_allocation = self._strategy_capital_allocations.get(strategy_name)
+            if strategy_capital_allocation is None:
+                logger.error(f"[ORDER] No capital_allocation for strategy '{strategy_name}' — skipping signal.")
+                continue
+
+            quantity = floor((nlv * strategy_capital_allocation * TRADE_WEIGHT) / price)
             if quantity <= 0:
                 logger.warning(f"[ORDER] Quantity rounds to 0 for {ticker} — skipping.")
                 continue
@@ -293,7 +303,8 @@ class Portfolio:
         if not raw_signals:
             return {"signals": [], "orders": [], "note": "no signals generated"}
 
-        clean_signals = schemas.deduplicate_signals(raw_signals)
+        aggregated_signals = schemas.aggregate_signals(raw_signals)
+        clean_signals = schemas.deduplicate_signals(aggregated_signals)
         clean_signals = self._apply_risk_management(clean_signals)
 
         orders = []
@@ -302,7 +313,14 @@ class Portfolio:
             price  = current_prices.get(ticker)
             if not price:
                 continue
-            quantity = floor((nlv * signal["weight_allocation"]) / price)
+
+            strategy_name = signal["strategy"]
+            strategy_capital_allocation = self._strategy_capital_allocations.get(strategy_name)
+            if strategy_capital_allocation is None:
+                logger.error(f"[DRY_RUN] No capital_allocation for strategy '{strategy_name}' — skipping signal.")
+                continue
+
+            quantity = floor((nlv * strategy_capital_allocation * TRADE_WEIGHT) / price)
             if quantity <= 0:
                 continue
             orders.append({
