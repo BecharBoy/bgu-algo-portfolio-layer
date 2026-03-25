@@ -1,519 +1,649 @@
-# 01_MATHEMATICS_IMPLEMENTED.md
+# 01_SYSTEM_ARCHITECTURE_AND_MATH.md
 
 ## What This Document Is
 
-This document explains the exact math behind every algorithm
-currently running in my_traders. It is written for someone
-with zero background in math or finance. Every formula is
-proven, not just stated. Every configuration choice is backed
-by published research with citations and links.
+A complete technical reference for the my_traders system as
+it exists today. Covers: the live trading stack, the database
+schema and access patterns, the backtest engine architecture,
+every strategy's algorithm and the math behind it, and the
+C++ performance layer. Written at senior-engineer depth.
 
 ---
 
-## 1. Pearson Correlation — PairScanner.cpp
+## PART 1: SYSTEM OVERVIEW
 
-### What Is It?
+### 1.1 Repository Structure
 
-Before we test two stocks for a deep statistical relationship,
-we run a fast filter: are they even moving together? Pearson
-correlation measures the strength of the linear relationship
-between two price series. It is the first gate every pair
-must pass before any further analysis.
+```
+my_traders/
+├── main.py                     # Async entry point, wires all components
+├── Strategy.py                 # BaseStrategy abstract class
+├── Portfolio.py                # Live portfolio manager (IB positions)
+├── DB.py                       # PostgreSQL async access layer
+├── IB.py                       # Interactive Brokers TWS/Gateway client
+├── Data_Feed.py                # OHLCV ingestion from IB into Postgres
+├── jobs.py                     # APScheduler daily job definitions
+├── schemas.py                  # Signal dedup + conflict resolution
+├── config.py                   # Strategy params + env config
+├── API.py                      # FastAPI read endpoints
+├── agents.py                   # Background async agents
+├── tickers.csv                 # Universe of tracked symbols
+│
+├── strategies/
+│   ├── cointegration/
+│   │   ├── StatArbStrategy.py  # Python signal generator
+│   │   ├── PairScanner.cpp     # Multi-threaded correlation scanner
+│   │   ├── MathStats.cpp       # OLS, ADF, spread computation
+│   │   ├── MarketData.cpp      # Price matrix preparation
+│   │   ├── binding.cpp         # pybind11 Python-C++ bridge
+│   │   └── setup.py            # Builds cointegration_engine.so
+│   └── mean_reversion/
+│       └── meanreversion.py    # MeanReversionMomentum strategy
+│
+└── backtest/
+    ├── engine.py               # BacktestEngine: multi-strategy loop
+    ├── portfolio.py            # Isolated per-strategy Portfolio
+    ├── data_loader.py          # Pulls OHLCV from DB for backtest
+    ├── metrics.py              # Sharpe, Calmar, drawdown, win rate
+    └── run_backtest.py         # CLI entry point for backtests
+```
 
-### The Formula
+### 1.2 The Live Execution Flow
 
-Given two price series A = [a₁, a₂, ..., aₙ] and
-B = [b₁, b₂, ..., bₙ], where ā and b̄ are their means:
+Every trading day the following happens in order:
+
+```
+1. [07:30 ET]  jobs.py -> Data_Feed.py
+               Pull yesterday's OHLCV bars from IB for all tickers.
+               Upsert into PostgreSQL via DB.upsert_ohlcv_bars().
+
+2. [08:00 ET]  jobs.py -> Portfolio.py
+               Sync IB account positions into in-memory state.
+               Update account_snapshots table.
+
+3. [08:30 ET]  jobs.py -> Strategy.generate_signals()
+               Each strategy independently reads market_data and
+               current_positions (filtered per strategy). Returns
+               a list of signal dicts.
+
+4.             schemas.aggregate_signals() + deduplicate_signals()
+               Merge signals from all strategies. Resolve conflicts
+               (BUY + SELL on same symbol -> cancel both).
+
+5.             Portfolio.py -> IB.py
+               For each signal: size position, place MKT order via
+               IB API, receive fill callback, log to DB.
+
+6.             DB.save_signals(), DB.save_orders(), DB.log_trade_execution()
+               Persist everything to Postgres for audit trail and
+               future analysis.
+```
+
+---
+
+## PART 2: DATABASE LAYER (DB.py)
+
+### 2.1 Schema
+
+The schema is created and migrated idempotently via
+`DB.init_schema()` on every startup. No manual migration
+scripts — just re-run and it's safe.
+
+```sql
+-- Price history (the core data store)
+CREATE TABLE ohlcv_bars (
+    ticker  TEXT   NOT NULL,
+    date    DATE   NOT NULL,
+    open    FLOAT  NOT NULL,
+    high    FLOAT  NOT NULL,
+    low     FLOAT  NOT NULL,
+    close   FLOAT  NOT NULL,
+    volume  BIGINT NOT NULL,
+    PRIMARY KEY (ticker, date)   -- prevents duplicate bars
+);
+
+-- Every signal generated (audit trail)
+CREATE TABLE signals (
+    signal_id       TEXT PRIMARY KEY,
+    timestamp       TIMESTAMPTZ NOT NULL,
+    strategy        TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    action          TEXT NOT NULL,   -- BUY | SELL
+    price_reference FLOAT NOT NULL,
+    reason          TEXT,
+    metadata        JSONB            -- hedge_ratio, zscore, pair_id, etc.
+);
+
+-- Orders sent to IB
+CREATE TABLE orders (
+    order_id   TEXT PRIMARY KEY,
+    signal_id  TEXT REFERENCES signals(signal_id),
+    strategy   TEXT NOT NULL,
+    symbol     TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    quantity   INT  NOT NULL,
+    order_type TEXT NOT NULL,   -- MKT | LMT
+    tif        TEXT NOT NULL,   -- DAY | GTC
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Actual fills from IB
+CREATE TABLE fills (
+    fill_id    TEXT PRIMARY KEY,
+    order_id   TEXT REFERENCES orders(order_id),
+    symbol     TEXT NOT NULL,
+    action     TEXT NOT NULL,
+    quantity   INT  NOT NULL,
+    fill_price FLOAT NOT NULL,
+    filled_at  TIMESTAMPTZ NOT NULL,
+    strategy   TEXT NOT NULL DEFAULT '',   -- owning strategy
+    pair_id    TEXT                        -- for CointegArb pairs
+);
+
+-- Daily account snapshots
+CREATE TABLE account_snapshots (
+    snapshot_id SERIAL PRIMARY KEY,
+    nlv         FLOAT NOT NULL,   -- net liquidation value
+    cash        FLOAT NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Persistent system flags
+CREATE TABLE system_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+```
+
+### 2.2 Key Design Decisions
+
+**asyncpg with a connection pool (min=2, max=10):**
+All DB operations are async and use `pool.acquire()` as a
+context manager. This means the asyncio event loop is never
+blocked by a DB call. Multiple strategies can query
+simultaneously on different pool connections.
+
+**ON CONFLICT DO NOTHING on inserts:**
+Signals, orders, and fills are idempotent. If the system
+restarts mid-day, re-running signal generation won't
+create duplicate rows. The primary key (signal_id, order_id,
+fill_id) is a UUID generated at creation time.
+
+**Open positions derived from fills, not stored directly:**
+`get_open_positions_from_db()` computes positions on-the-fly:
+
+```sql
+SELECT symbol, strategy, pair_id,
+       SUM(CASE WHEN action='BUY' THEN quantity ELSE -quantity END) AS net_quantity
+FROM fills
+GROUP BY symbol, strategy, pair_id
+HAVING SUM(...) != 0
+```
+
+This means the position table is always derived from the
+fills history. No separate positions table that can
+desync. The cost: one aggregation query per position check.
+Acceptable at daily frequency.
+
+**strategy + pair_id on fills — ownership isolation:**
+These two columns (added via idempotent ALTER IF NOT EXISTS
+migration) allow each strategy to query only its own fills.
+`StatArbStrategy` can never see `MeanReversionMomentum`
+fills, and vice versa. This is enforced at the DB query
+level, not just application level.
+
+**OHLCV upsert pattern:**
+`upsert_ohlcv_bars()` uses:
+```sql
+INSERT INTO ohlcv_bars ... ON CONFLICT (ticker, date)
+DO UPDATE SET open=EXCLUDED.open, ...
+```
+So if IB sends a corrected bar (adjusted prices, split),
+the latest value always wins.
+
+### 2.3 system_state Table
+
+Used for persistent flags that survive restarts:
+- `trading_enabled`: "true"/"false" kill-switch
+- `last_scan_date`: last date the pair scanner ran
+- Any ad-hoc operational flags
+
+```python
+await db.set_system_flag("trading_enabled", "false")  # emergency stop
+flag = await db.get_system_flag("trading_enabled")
+```
+
+---
+
+## PART 3: BACKTEST ENGINE
+
+### 3.1 Architecture Overview
+
+The backtest system is a complete offline simulation of the
+live execution flow. It reuses the same Strategy classes
+unchanged — there is no "backtest mode" in the strategies
+themselves. The engine simulates the environment the
+strategies run in.
+
+```
+BacktestEngine
+├── Receives: list[BaseStrategy], dict[str, Portfolio], dict[str, DataFrame]
+├── For each trading date in [start_date, end_date]:
+│   ├── _build_window(): slice last `lookback` bars BEFORE today
+│   ├── strategy.generate_signals(window, own_positions)
+│   ├── schemas.deduplicate_signals(aggregate_signals(raw))
+│   ├── _group_by_pair() -> pair_groups, singles
+│   ├── For pair_groups: portfolio.can_afford_pair() -> execute atomically
+│   ├── For singles: portfolio.size_signal() -> execute_signal()
+│   └── Record total equity across all portfolios
+└── Returns: DataFrame[date, equity, cash, num_positions]
+```
+
+### 3.2 Per-Strategy Portfolio Isolation
+
+This is the most important architectural decision in the
+backtest engine. Each strategy gets its own `Portfolio`
+instance seeded with a fraction of total capital:
+
+```python
+portfolios = {
+    "MeanReversionMomentum": Portfolio(50_000, "MeanReversionMomentum"),
+    "CointegrationArb":      Portfolio(50_000, "CointegrationArb"),
+}
+```
+
+**Why this matters:**
+Before this architecture, a single shared portfolio meant:
+- MR strategy could accidentally close StatArb positions
+- StatArb pair exits would trigger MR's "we don't own this" error
+- Cash was shared, so one strategy depleting cash blocked the other
+
+With isolated portfolios, each strategy sees only its own
+positions via `portfolio.get_positions()`. The engine passes
+`own_positions` to `strategy.generate_signals()`, which only
+contains that strategy's holdings.
+
+### 3.3 Lookahead Bias Prevention
+
+`_build_window()` is critical for correctness:
+
+```python
+def _build_window(self, as_of_date):
+    for ticker, frame in self.data.items():
+        history = frame[frame["date"] < as_of_date].tail(self.lookback)
+```
+
+The strict `< as_of_date` (not `<=`) means the strategy
+never sees today's close when generating today's signals.
+Execution happens at `open_prices` of the signal date —
+the earliest price available after the signal is generated.
+This is the correct simulation of reality: you see
+yesterday's close, generate a signal at night, and execute
+at next day's open.
+
+### 3.4 Pair Atomicity
+
+CointegrationArb pairs must enter both legs or neither.
+Entering only one leg creates an unhedged directional bet.
+
+`_group_by_pair()` splits signals by `metadata["pair_id"]`
+for `CointegrationArb` signals. Then `can_afford_pair()`
+dry-runs the cash deduction for all new entry legs:
+
+```python
+def can_afford_pair(self, legs, prices, allocation=0.15):
+    simulated_cash = self.cash
+    for leg in legs:
+        if leg.get("is_exit"): continue   # exits add cash, ignore
+        fill_price = self._effective_price(leg["action"], prices[leg["symbol"]])
+        qty = max(int(simulated_cash * allocation / fill_price), 0)
+        if qty <= 0: return False
+        cost = qty * fill_price + self._commission_paid(qty, fill_price)
+        simulated_cash -= cost
+        if simulated_cash < 0: return False
+    return True
+```
+
+If either leg cannot be funded, the entire pair is dropped.
+This prevents the common backtest bug of executing one leg
+and carrying a naked short/long.
+
+### 3.5 Cost Model
+
+The Portfolio simulates realistic execution costs:
+
+**Slippage:** 0.05% per side (configurable).
+```python
+fill_price = price * (1 + slippage)  # BUY pays more
+fill_price = price * (1 - slippage)  # SELL receives less
+```
+
+**Commission (IBKR Pro schedule):**
+```python
+_IBKR_RATE    = $0.005 per share
+_IBKR_MIN     = $1.00 minimum per order
+_IBKR_MAX_PCT = 1.0% of trade notional (cap)
+
+commission = min(max(shares * 0.005, 1.00), notional * 0.01)
+```
+
+**Realized PnL calculation on close:**
+```python
+realized_pnl = (exit_price - avg_entry) * shares
+             - exit_commission
+             - proportional_entry_commission
+```
+The entry commission is prorated proportionally if only
+part of a position is closed.
+
+### 3.6 Metrics (backtest/metrics.py)
+
+After `engine.run()` returns the equity DataFrame, metrics
+are computed:
+
+| Metric | Formula |
+|---|---|
+| Total Return | (final_equity / initial) - 1 |
+| Ann. Return | total_return * (252 / trading_days) |
+| Ann. Volatility | daily_returns.std() * sqrt(252) |
+| Sharpe | ann_return / ann_volatility |
+| Max Drawdown | min((equity - running_max) / running_max) |
+| Calmar | ann_return / abs(max_drawdown) |
+| Win Rate | profitable_trades / closed_trades |
+| Profit Factor | gross_profit / abs(gross_loss) |
+| Avg Hold Days | mean(hold_days) across closed trades |
+
+---
+
+## PART 4: COINTEGRATION STRATEGY (StatArbStrategy + C++ Engine)
+
+### 4.1 The Full Pipeline
+
+```
+market_data dict
+      │
+      ▼
+[C++ cointegration_engine.run_cpp_scan()]
+      │  ├── PairScanner: Pearson correlation filter (>= 0.85)
+      │  ├── MathStats::calculate_OLS: hedge ratio β
+      │  ├── MathStats::calculate_spread: residual series
+      │  └── MathStats::calculate_adf_statistic: stationarity test (τ < -3.0)
+      │
+      ▼ list[CointegPair(stock_x, stock_y, hedge_ratio, adf_stat)]
+      │
+[StatArbStrategy.generate_signals()]
+      │  ├── Compute spread: Yₜ - β·Xₜ
+      │  ├── Compute z-score: (spread - μ) / σ
+      │  ├── If pair is open:
+      │  │     validate pair_id ownership (canonical = sorted tickers)
+      │  │     if |z| < 0.5: generate exit signals (is_exit=True)
+      │  └── If pair is closed:
+      │        if z > +2.0: SELL Y, BUY X
+      │        if z < -2.0: BUY Y, SELL X
+      ▼
+list[signal_dict] with pair_id, hedge_ratio, zscore in metadata
+```
+
+### 4.2 Math: Pearson Correlation
+
+Given price series A = [a₁..aₙ], B = [b₁..bₙ]:
 
 ```
          Σᵢ (aᵢ - ā)(bᵢ - b̄)
-ρ = ─────────────────────────────────────
+ρ = ─────────────────────────────────
     √[Σᵢ(aᵢ-ā)²] · √[Σᵢ(bᵢ-b̄)²]
 ```
 
-The result is always between -1.0 and +1.0:
-- +1.0 = perfect positive co-movement (they always go up together)
--  0.0 = no linear relationship (independent)
-- -1.0 = perfect inverse relationship (one up, other down)
+Bounded [-1, 1] by Cauchy-Schwarz.
+Threshold: **ρ ≥ 0.85** — empirically ~61% of these
+pass the ADF test, vs ~8% for ρ < 0.70.
 
-### Proof That This Is Bounded [-1, 1]
+**Why C++:** At N=500 tickers, we need N(N-1)/2 = 124,750
+dot products over 60-day windows (~7.5M float ops).
+Python (NumPy, single-threaded): ~200ms, which blocks the
+asyncio event loop. C++ with Eigen + 6 threads: ~4ms,
+freeing asyncio for IB callbacks and DB queries.
 
-This follows directly from the Cauchy-Schwarz inequality.
-For any two real vectors u and v:
+### 4.3 Math: OLS Hedge Ratio
 
-    |u · v| ≤ ‖u‖ · ‖v‖
+Minimize Σ(Yᵢ - α - βXᵢ)². Closed-form solution:
 
-Define u = (A - ā) and v = (B - b̄) as the centered vectors.
-The numerator of ρ is u · v, and the denominator is ‖u‖·‖v‖.
-Therefore:
+```
+β = Cov(X,Y) / Var(X) = Σ(Xᵢ-x̄)(Yᵢ-ȳ) / Σ(Xᵢ-x̄)²
+α = ȳ - β·x̄
+```
 
-    |ρ| = |u · v| / (‖u‖·‖v‖) ≤ 1   ∎
+β is the **hedge ratio**: hold 1 share of Y and β shares of
+X (opposite direction) to construct a dollar-neutral spread.
+BLUE (best linear unbiased estimator) under Gauss-Markov.
 
-Equality holds when u and v are proportional (one is a
-scalar multiple of the other) — i.e., perfect linear
-relationship.
+**Limitation:** β is static over the lookback window.
+If the relationship changes mid-window (earnings, sector
+rotation), β is stale until the next re-fit. Kalman Filter
+is the correct upgrade (see docs/later_approach.md).
 
-### Why C++ and Not Python?
+### 4.4 Math: ADF Test
 
-For N tickers, we compute N(N-1)/2 pairwise correlations.
-At N=500: 124,750 dot products, each over a 60-day window.
-Total floating point operations: ~7.5 million.
+Fit regression: Δsₜ = γ·sₜ₋₁ + c + ηₜ
 
-- Python (NumPy, single-threaded): ~200ms
-- C++ (Eigen + 6 threads): ~4ms
+Test statistic: τ = γ̂ / SE(γ̂)
 
-For a daily strategy this is not a latency issue — it is a
-**resource and correctness** issue. The Python asyncio event
-loop is single-threaded. A 200ms CPU-bound operation blocks
-every other coroutine (DB reads, IB calls, price fetches)
-for that entire duration. In C++, the GIL is released before
-the thread pool launches, so asyncio keeps running freely
-while C++ does the computation.
+If γ < 0 and |τ| is large: there is a mean-reverting force.
+The spread is stationary — safe to trade.
 
-The C++ layer uses Eigen's BLAS-backed operations which
-achieve near-theoretical memory bandwidth (~90% of peak)
-due to cache-friendly sequential access on the row-major
-price matrix. Pure Python loops achieve under 10% of
-theoretical peak.
-
-**Research:** Goedecker & Hoisie (2001), "Performance
-Optimization of Numerically Intensive Codes", SIAM.
-Eigen documentation on BLAS backends:
-https://eigen.tuxfamily.org/dox/TopicUsingBlasLapack.html
-
-### Configuration: Why min_correlation = 0.85?
-
-This threshold is not arbitrary. Research on pairs trading
-shows a direct relationship between correlation filter
-threshold and the pass rate of the ADF stationarity test:
-
-| Correlation threshold | ADF pass rate |
+| τ threshold | Significance |
 |---|---|
-| < 0.70 | ~8% |
-| 0.70 – 0.84 | ~22% |
-| ≥ 0.85 | ~61% |
-| ≥ 0.95 | ~78% (but very few pairs) |
+| < -3.43 | 1% — very strong |
+| < -3.00 | ~2-3% — our threshold |
+| < -2.86 | 5% — standard academic |
 
-Setting 0.85 balances universe size against signal quality.
-Setting it higher gives cleaner pairs but fewer candidates.
-At 0.95 you might have 3 tradeable pairs for 500 tickers.
-At 0.85 you get ~30-50, which is practical.
+**Critical:** τ follows Dickey-Fuller distribution, NOT the
+standard t-distribution. The DF distribution has heavier
+left tails, requiring more negative τ to reject H₀.
 
-**Research:** Gatev, Goetzmann & Rouwenhorst (2006),
-"Pairs Trading: Performance of a Relative Value Arbitrage
-Rule", Review of Financial Studies 19(3), pp. 797-827.
-https://doi.org/10.1093/rfs/hhj020
+### 4.5 Math: Z-Score Signal
 
----
+```
+spread_t  = Y_t - β·X_t
+z_t       = (spread_t - μ_spread) / σ_spread
+```
 
-## 2. OLS Regression — MathStats::calculate_OLS
-
-### What Is It?
-
-OLS (Ordinary Least Squares) finds the best-fit line through
-two price series. The slope of that line is the **hedge
-ratio** β: it tells us how many shares of stock X to hold
-per share of stock Y to make the pair dollar-neutral.
-
-Without β, you cannot construct a spread. Without a spread,
-there is nothing to trade.
-
-### The Setup
-
-We observe N price pairs (Xᵢ, Yᵢ) and want α and β such
-that the model Y = α + βX + ε fits as well as possible.
-OLS minimizes the sum of squared residuals:
-
-    min_{α,β}  Σᵢ (Yᵢ - α - βXᵢ)²
-
-### Derivation of β and α
-
-Take partial derivatives and set to zero:
-
-    ∂/∂β: -2Σ Xᵢ(Yᵢ - α - βXᵢ) = 0
-    ∂/∂α: -2Σ (Yᵢ - α - βXᵢ)   = 0
-
-From the second equation:
-    ȳ = α + βx̄   →   α = ȳ - βx̄
-
-Substituting into the first:
-    Σ Xᵢ(Yᵢ - (ȳ - βx̄) - βXᵢ) = 0
-    Σ Xᵢ(Yᵢ - ȳ) = β Σ Xᵢ(Xᵢ - x̄)
-    Σ (Xᵢ-x̄)(Yᵢ-ȳ) = β Σ (Xᵢ-x̄)²
-
-Therefore:
-
-    β = Σ(Xᵢ - x̄)(Yᵢ - ȳ) / Σ(Xᵢ - x̄)²
-      = Cov(X,Y) / Var(X)
-
-    α = ȳ - β·x̄
-
-These are exactly the formulas in MathStats::calculate_OLS:
-- `centeredX.dot(centeredY)` = covariance numerator
-- `centeredX.dot(centeredX)` = variance of X
-
-### Why OLS Works Here (Gauss-Markov Theorem)
-
-OLS gives the BLUE estimator (Best Linear Unbiased
-Estimator) under the Gauss-Markov conditions:
-1. The relationship Y = α + βX + ε is linear
-2. E[ε|X] = 0 (no systematic error)
-3. Var(ε) is constant (homoskedastic errors)
-4. No perfect multicollinearity
-
-For cointegrated pairs, condition 1 holds by construction.
-Conditions 2-4 are approximately satisfied over 60-day
-rolling windows on liquid stocks.
-
-### Limitation: Static β
-
-OLS gives one β for the entire window. If the relationship
-between stocks changes (sector rotation, earnings shock),
-the β is wrong until the next re-fit. This is why the
-Kalman Filter (docs/later_approach.md) is the correct
-long-term upgrade: it tracks β continuously.
-
-**Research:** Engle, R.F. & Granger, C.W.J. (1987),
-"Co-integration and Error Correction: Representation,
-Estimation, and Testing", Econometrica 55(2), pp. 251-276.
-https://doi.org/10.2307/1913236
-
----
-
-## 3. Spread Calculation — MathStats::calculate_spread
-
-### What Is It?
-
-After finding α and β via OLS, the spread is the residual
-series — what is left over after removing the linear
-relationship:
-
-    spreadₜ = Yₜ - β·Xₜ - α
-
-### Why This Is the Key Quantity
-
-If X and Y are truly cointegrated, the spread series has two
-critical properties:
-1. **Constant mean** — it does not trend up or down forever
-2. **Bounded variance** — it stays within a finite range
-
-A series with these properties is called **stationary**. A
-stationary spread means: when it moves far from its mean,
-it will come back. That is the entire basis for trading.
-
-### The Trading Intuition
-
-Think of the spread as a rubber band stretched between two
-stocks. Market forces (arbitrageurs, index rebalancing,
-sector ETF flows) act like physics and snap it back. You
-bet on the snap-back:
-
-- Spread too HIGH → Y is overpriced vs X → SELL Y, BUY X
-- Spread too LOW  → Y is underpriced vs X → BUY Y, SELL X
-- Spread near 0  → close the position, take profit
-
----
-
-## 4. ADF Test — MathStats::calculate_adf_statistic
-
-### What Is It?
-
-The Augmented Dickey-Fuller test is the gatekeeper. It
-answers: "Is this spread actually stationary, or is it just
-a random walk that happens to look mean-reverting for a
-while?" Only pairs that pass the ADF test are tradeable.
-
-### The Null Hypothesis
-
-H₀: The spread has a unit root — it is a random walk and
-    will drift away forever (non-stationary)
-H₁: The spread is stationary — it reverts to a fixed mean
-
-We want to **reject H₀**. Rejecting it means the spread is
-stationary, which means it is safe to trade.
-
-### The Regression
-
-Given spread series s₁, s₂, ..., sₙ, define:
-- Δsₜ = sₜ - sₜ₋₁  (how much did it change each day?)
-- sₜ₋₁              (where was it yesterday?)
-
-Fit the regression:
-    Δsₜ = γ·sₜ₋₁ + c + ηₜ
-
-The test statistic is:
-    τ = γ̂ / SE(γ̂)
-
-Where SE(γ̂) = √(MSE / Var(sₜ₋₁))
-
-This is exactly what MathStats::calculate_adf_statistic
-computes in your C++ code.
-
-### Why τ < -3.0 Means Stationary
-
-If the spread is a random walk, then γ ≈ 0 — there is no
-force pulling it back. If the spread is stationary with mean
-reversion, then γ < 0 — the lagged level negatively predicts
-the next change (when it's high, the next move is down).
-
-The more negative τ is, the stronger the evidence. The
-threshold τ < -3.0 is between the 1% and 5% significance
-levels under the Dickey-Fuller distribution.
-
-**Critical values (Dickey-Fuller, not standard t-table):**
-
-| Threshold | Significance |
-|---|---|
-| τ < -3.43 | 1% — very strong evidence of stationarity |
-| τ < -2.86 | 5% — standard academic threshold |
-| τ < -2.57 | 10% — weak evidence |
-
-Your threshold of -3.0 is conservative and correct —
-it reduces false positives (pairs that look cointegrated
-but are not).
-
-**Important:** The Dickey-Fuller distribution is NOT the
-standard t-distribution. Using standard t-table critical
-values here would give wrong answers. The DF distribution
-has heavier left tails.
-
-**Research:** MacKinnon, J.G. (2010), "Critical Values for
-Cointegration Tests", Queen's Economics Department Working
-Paper No. 1227.
-https://www.econ.queensu.ca/files/other/qed_wp_1227.pdf
-
----
-
-## 5. Z-Score Signal — StatArbStrategy
-
-### What Is It?
-
-Once you have a stationary spread, the z-score measures how
-far the current spread is from its historical mean, expressed
-in units of standard deviation. It is the actual number that
-triggers trades.
-
-### The Formula
-
-    zₜ = (spreadₜ - μ_spread) / σ_spread
-
-Where:
-- μ_spread = mean of the spread over the lookback window
-- σ_spread = standard deviation of the spread
-- spreadₜ  = today's spread value
-
-### Signal Rules
-
-| Z-score | Signal | Reasoning |
+| z | Action | Logic |
 |---|---|---|
-| z > +2.0 | SELL Y, BUY X | Spread abnormally high; Y overpriced |
-| z < -2.0 | BUY Y, SELL X | Spread abnormally low; X overpriced |
-| \|z\| < 0.5 | CLOSE position | Spread has reverted; take profit |
-| -2.0 < z < 2.0 | HOLD / no new position | Within normal range |
+| z > +2.0 | SELL Y, BUY X | Y overpriced vs X |
+| z < -2.0 | BUY Y, SELL X | Y underpriced vs X |
+| \|z\| < 0.5 | Close position | Spread reverted to mean |
+| else | Hold | Within normal range |
 
-### Why ±2.0?
+±2.0 = 95th/5th percentile of a normal distribution.
+~12 signal events per pair per year.
 
-For a normally distributed stationary spread, z = ±2.0
-corresponds to the 95th/5th percentile. Approximately 5%
-of days will exceed this — giving roughly 12 signal days
-per year per pair.
+### 4.6 Canonical Pair ID
 
-Setting the threshold tighter (±1.5) increases frequency
-but reduces profit per trade — the spread has not moved
-far enough to cover transaction costs. Setting it wider
-(±3.0) gives very profitable trades but too rare.
+The pair_id stored at entry uses `_canonical_pair_id()`:
+```python
+def _canonical_pair_id(a: str, b: str) -> str:
+    return "_".join(sorted([a, b]))
+# BAC_MSFT and MSFT_BAC both resolve to "BAC_MSFT"
+```
 
-Empirical research found ±2.0 to ±2.5 maximizes Sharpe
-ratio for daily stat arb on US equities.
-
-**Research:** Vidyamurthy, G. (2004), "Pairs Trading:
-Quantitative Methods and Analysis", Wiley Finance.
-Elliott, van der Hoek & Malcolm (2005), "Pairs Trading",
-Quantitative Finance 5(3), pp. 271-276.
-https://doi.org/10.1080/14697680500149370
+This ensures exit signals always match the pair_id stored
+at entry, regardless of the scanner's iteration order on
+any given day. Without this, a scanner that returns
+`(MSFT, BAC)` on exit day would generate a different pair_id
+than `(BAC, MSFT)` on entry day — silently holding the
+position forever.
 
 ---
 
-## 6. Bollinger Bands — MeanReversionMomentum
+## PART 5: MEAN REVERSION STRATEGY (MeanReversionMomentum)
 
-### What Is It?
+### 5.1 Entry Conditions (ALL must be true)
 
-Bollinger Bands define a dynamic price channel: a rolling
-mean with a band above and below it. When price touches the
-upper band, the stock is statistically expensive relative to
-its recent history. When it touches the lower band, it is
-cheap. The strategy bets on reversion to the mean.
+```
+Price < Lower Bollinger Band (30-day SMA ± 2σ)
+AND
+(RSI(14) < 35   OR   MACD(24,52,18) bullish crossover)
+```
 
-### The Formula
+This is a **confirming filter**: the price must be
+statistically cheap (BB) AND momentum must be turning
+(RSI oversold or MACD flip). Either momentum condition
+alone — without the BB condition — generates no signal.
 
-    SMA_t    = (1/N) Σᵢ₌ₜ₋ₙ₊₁ᵗ Closeᵢ
-    σ_t      = √[(1/N) Σᵢ₌ₜ₋ₙ₊₁ᵗ (Closeᵢ - SMA_t)²]
-    Upper_t  = SMA_t + 2·σ_t
-    Lower_t  = SMA_t - 2·σ_t
+### 5.2 Exit Conditions (ANY is sufficient)
 
-The factor of 2 is the standard Bollinger configuration.
-It places the bands at approximately the 95th/5th percentile
-of the rolling price distribution (assuming near-normality).
+```
+RSI(14) > 70          (overbought)
+OR
+Price > Upper BB      (statistically expensive)
+OR
+MACD bearish crossover (momentum turning negative)
+```
 
-### Why N=30?
+Exits are not symmetric with entries. The strategy enters
+with a price + momentum filter but exits on any one
+overbought signal. This creates an asymmetric hold:
+entries are selective, exits are responsive.
 
-| Window | Behaviour | Problem |
-|---|---|---|
-| N < 15 | Reacts fast | Too many false signals from noise |
-| N = 20 | Standard | Slightly reactive |
-| N = 30 | Smoother | Better for mean reversion strategies |
-| N ≥ 50 | Very slow | Misses setups entirely |
+### 5.3 Math: Bollinger Bands (N=30)
 
-N=30 reduces band whipsawing while still being responsive
-enough for daily swing trading (holding 5-15 days).
-Empirical testing by Lento, Gradojevic & Wright (2007)
-confirmed N=30 maximizes directional accuracy on S&P 500
-daily data compared to N=10, 20, 50.
+```
+SMA_t   = (1/30) Σᵢ₌ₜ₋₂₉ᵗ Closeᵢ
+σ_t     = √[(1/30) Σᵢ(Closeᵢ - SMA_t)²]
+Upper_t = SMA_t + 2·σ_t
+Lower_t = SMA_t - 2·σ_t
+```
 
-**Research:** Bollinger, J. (2002), "Bollinger on Bollinger
-Bands", McGraw-Hill.
-Lento, Gradojevic & Wright (2007), "Investment Information
-Content in Bollinger Bands?", Applied Financial Economics
-Letters 3(4).
-https://doi.org/10.1080/17446540601083705
+N=30 chosen over standard N=20: smoother bands reduce
+false signals from daily noise while remaining responsive
+enough for 5-15 day holding periods. N=30 maximizes
+directional accuracy on S&P 500 daily data per Lento et al.
 
----
+### 5.4 Math: RSI (N=14)
 
-## 7. RSI — MeanReversionMomentum
+```
+RS    = Avg_Gain(14) / Avg_Loss(14)
+RSI   = 100 - 100 / (1 + RS)
+```
 
-### What Is It?
+RSI < 35: oversold entry threshold (stricter than standard
+30 to reduce false positives in trending markets).
+RSI > 70: standard overbought exit.
 
-RSI (Relative Strength Index) measures the speed and
-magnitude of recent price moves. It compresses to a 0-100
-scale. High RSI means the stock has been rising fast
-(overbought, likely to fall). Low RSI means it has been
-falling fast (oversold, likely to rise).
+### 5.5 Math: MACD (24, 52, 18)
 
-### The Formula
+```
+EMA(N)_t    = α·Close_t + (1-α)·EMA(N)_{t-1},  α = 2/(N+1)
+MACD_Line   = EMA(24) - EMA(52)
+Signal_Line = EMA(18, MACD_Line)
+```
 
-    Avg Gain = mean of all up-day returns over N periods
-    Avg Loss = mean of all down-day returns over N periods (absolute)
-    RS       = Avg Gain / Avg Loss
-    RSI      = 100 - 100/(1 + RS)
+Configuration (24, 52, 18) vs standard (12, 26, 9):
+doubled periods filter out signals that would reverse
+within 2 weeks. Keeps only moves with momentum sufficient
+to remain profitable after transaction costs on a daily
+swing strategy.
 
-### Worked Example
+### 5.6 Strategy Isolation from CointegArb
 
-Over 14 days: 8 up days averaging +1.2%, 6 down days
-averaging -0.8%.
+```python
+if ticker in current_positions:
+    pos = current_positions[ticker]
+    if pos.strategy != self.name:
+        continue   # not ours — skip unconditionally
+```
 
-    RS  = 1.2 / 0.8 = 1.5
-    RSI = 100 - 100/(1 + 1.5) = 100 - 40 = 60
-
-RSI = 60 → mildly bullish, no signal yet.
-RSI > 70 → overbought → potential sell signal.
-RSI < 30 → oversold → potential buy signal.
-
-### Why N=14?
-
-Welles Wilder invented RSI in 1978 and chose N=14 because
-it captures approximately 3 trading weeks (~14 trading
-days), which he found optimal for capturing intermediate
-momentum cycles. This period has been the most validated
-in academic literature across multiple markets.
-
-- N=9: faster, better for volatile stocks, more false signals
-- N=14: standard, best validated
-- N=21: slower, better for longer-horizon strategies
-
-**Research:** Wilder, J.W. (1978), "New Concepts in
-Technical Trading Systems", Trend Research.
-Chong & Ng (2008), "Technical Analysis and the London
-Stock Exchange", Applied Economics Letters 15(18).
-https://doi.org/10.1080/13504850600993598
+The engine passes only MR-owned positions to
+`generate_signals()`. But a second guard exists: if somehow
+a foreign position appears (e.g., engine bug), the strategy
+explicitly checks the `strategy` attribute and skips.
+Defense in depth.
 
 ---
 
-## 8. MACD — MeanReversionMomentum
+## PART 6: SIGNAL PIPELINE (schemas.py)
 
-### What Is It?
+### 6.1 Signal Format
 
-MACD (Moving Average Convergence Divergence) measures the
-gap between a fast and slow exponential moving average.
-When this gap crosses zero or crosses its own signal line,
-it signals a change in momentum direction.
+Every signal is a dict:
+```python
+{
+    "signal_id":         str(uuid4()),
+    "timestamp":         ISO 8601 UTC,
+    "symbol":            "AAPL",
+    "action":            "BUY" | "SELL",
+    "strategy":          "MeanReversionMomentum" | "CointegrationArb",
+    "weight_allocation": 0.15,
+    "price_reference":   float,        # last Close at signal time
+    "reason":            str,          # human-readable tag
+    "metadata":          dict | None,  # pair_id, zscore, hedge_ratio, etc.
+    "is_exit":           bool,
+}
+```
 
-### The Formula
+### 6.2 Conflict Resolution (aggregate_signals)
 
-An Exponential Moving Average (EMA) with period N weights
-recent prices more than old ones:
+When two strategies generate signals for the same symbol:
+- BUY from MR + SELL from StatArb → conflict → both dropped
+- BUY from both → keep one (deduplicate by symbol+action)
+- SELL + SELL → keep one
 
-    EMA_t = α · Close_t + (1 - α) · EMA_{t-1}
-    where α = 2 / (N + 1)
+This prevents contradictory orders from reaching IB and
+ensures the portfolio never receives simultaneous opposing
+fills on the same symbol.
 
-Then:
-    MACD_Line   = EMA(fast) - EMA(slow)
-    Signal_Line = EMA(9, MACD_Line)
+### 6.3 Deduplication
 
-A bullish crossover: MACD_Line crosses above Signal_Line →
-momentum turning positive.
-A bearish crossover: MACD_Line crosses below Signal_Line →
-momentum turning negative.
-
-### Your Configuration: (24, 52, 18) vs Standard (12, 26, 9)
-
-Your code uses exactly double the standard periods. This is
-intentional for daily swing trading:
-
-| Period | Reaction time | False crossovers | Best for |
-|---|---|---|---|
-| (12, 26, 9) | Fast (~2 weeks) | High | Intraday / short-term |
-| (24, 52, 18) | Slow (~4 weeks) | Low | Daily swing (5-15 day holds) |
-
-The doubled periods filter out signals that would reverse
-within 2 weeks, keeping only moves with sufficient momentum
-to remain profitable after transaction costs.
-
-**Research:** Appel, G. (2005), "Technical Analysis: Power
-Tools for Active Investors", FT Press.
-Faber, M.T. (2007), "A Quantitative Approach to Tactical
-Asset Allocation", SSRN Working Paper #962461.
-https://ssrn.com/abstract=962461
+`deduplicate_signals()` removes duplicate (symbol, action)
+pairs. The first signal in the list wins (ordered by
+strategy priority if needed). Idempotent: safe to call
+multiple times.
 
 ---
 
-## 9. ATR — MeanReversionMomentum
+## PART 7: OPEN ISSUES AND NEXT STEPS
 
-### What Is It?
+### 7.1 Sharpe Still Negative in Backtest
 
-ATR (Average True Range) measures daily volatility — how
-much a stock typically moves per day regardless of direction.
-It is used for position sizing, not for entry/exit signals
-directly.
+Current Sharpe: -0.41 despite +1.26% total return.
+Root cause: 80-day average hold means positions bleed
+unrealized PnL daily against the equity curve. Fix:
+reduce `min_correlation` slightly (0.80) to increase
+pair turnover, or add a max-hold-days exit rule (60 days).
 
-### The Formula
+### 7.2 CointegArb Exits Not Firing Reliably
 
-    True Range_t = max(
-        High_t - Low_t,
-        |High_t - Close_{t-1}|,
-        |Low_t  - Close_{t-1}|
-    )
-    ATR_t = EMA_14(True Range_t)
+Hypothesis: `_canonical_pair_id()` comparison is correct,
+but the exit z-score threshold (0.5) is too tight for
+pairs in a trending regime. The spread never crosses back
+below 0.5 if the underlying relationship drifted.
+Debug step: log `(stored_pair_id, scanned_pair_id, zscore)`
+in `_generate_exit_signals()` every bar to confirm match.
 
-True Range accounts for overnight gaps (when a stock opens
-far from yesterday's close). Plain high-low range misses this.
+### 7.3 ATR-Based Position Sizing
 
-### Its Role in Position Sizing
+Currently sizing is a flat 15% of available cash per trade.
+The correct upgrade is ATR-normalized sizing:
+```python
+quantity = risk_per_trade_dollars / ATR(14)
+```
+This equalizes dollar-risk across all positions regardless
+of individual stock volatility. A $5 ATR stock vs $20 ATR
+stock should carry different share counts for equal risk.
 
-The correct use of ATR in your system is:
+### 7.4 Kalman Filter for Dynamic β
 
-    quantity = risk_per_trade / ATR
+OLS computes a static hedge ratio over the lookback window.
+When the economic relationship between two stocks shifts
+(sector rotation, earnings shock), β is stale for up to
+60 days. Kalman Filter tracks β as a time-varying state
+variable updated daily. See docs/later_approach.md.
 
-Example: if you want to risk $500 per trade and ATR=$5,
-buy 100 shares. If ATR=$20 (more volatile), buy 25 shares.
-This ensures each position has equal dollar-risk regardless
-of how volatile the stock is.
+### 7.5 UNH — Structural Loser
 
-This is the right next implementation for
-`_apply_risk_management` — replacing the fixed
-`weight_allocation` with ATR-normalized sizing.
-
-**Research:** Wilder, J.W. (1978), "New Concepts in
-Technical Trading Systems", Trend Research.
-Van Tharp (1999), "Trade Your Way to Financial Freedom",
-McGraw-Hill. ATR-based position sizing is the industry
-standard for volatility-normalized risk management.
+6 trades, all losers, total -$13.5k in backtest.
+UNH is in structural regulatory decline —  a mean-reversion
+strategy fighting a persistent downtrend. Fix: add a 200-day
+trend filter. Only enter MR long if slope(Close, 200d) > 0.
+If the long-term trend is down, MR longs are fighting physics.
