@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from Strategy import BaseStrategy
+from strategies.Strategy import BaseStrategy
 
 try:
     import cointegration_engine

@@ -1,7 +1,7 @@
 import pandas as pd
 import talib as ta
 from typing import List, Dict, Any
-from Strategy import BaseStrategy
+from strategies.Strategy import BaseStrategy
 import uuid
 from datetime import datetime, timezone
 

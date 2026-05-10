@@ -224,11 +224,11 @@ UNIVERSE = load_tickers("tickers.csv")
 
 ### Run Backtest
 ```bash
-PYTHONPATH=. python backtest/run_backtest.py
-# Output: backtest/results/equity_curve.csv
-#         backtest/results/trade_log.csv
-#         backtest/results/metrics.json
-#         backtest/results/equity_curve.png
+PYTHONPATH=. python backtest_cointegration/run_backtest.py
+# Output: backtest_cointegration/results/equity_curve.csv
+#         backtest_cointegration/results/trade_log.csv
+#         backtest_cointegration/results/metrics.json
+#         backtest_cointegration/results/equity_curve.png
 ```
 
 ### Run Live (Dry Mode — No Orders Placed)

@@ -78,7 +78,7 @@ def compute_metrics(
 
 def plot_equity_curve(
     equity_curve: pd.DataFrame,
-    output_path: str = "backtest/results/equity_curve.png",
+    output_path: str = "backtest_cointegration/results/equity_curve.png",
 ) -> None:
     if equity_curve.empty:
         return

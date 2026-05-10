@@ -1,0 +1,1 @@
+"""gets stocks data from IB 24/7 and puts it into the database"""

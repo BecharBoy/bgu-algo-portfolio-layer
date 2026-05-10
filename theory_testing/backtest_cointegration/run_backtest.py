@@ -10,10 +10,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from backtest.data_loader import load_from_csv, load_from_db
-from backtest.engine import BacktestEngine
-from backtest.metrics import compute_metrics, plot_equity_curve
-from backtest.portfolio import Portfolio
+from theory_testing.backtest_cointegration.data_loader import load_from_csv, load_from_db
+from theory_testing.backtest_cointegration.engine import BacktestEngine
+from theory_testing.backtest_cointegration.metrics import compute_metrics, plot_equity_curve
+from theory_testing.backtest_cointegration.portfolio import Portfolio
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "strategies" / "cointegration"))
@@ -23,7 +23,7 @@ from strategies.cointegration.StatArbStrategy import StatArbStrategy
 
 # ── Config ────────────────────────────────────────────────────────────────────
 LOAD_MODE     = "db"
-CSV_PATH      = "backtest/sample_data"
+CSV_PATH      = "backtest_cointegration/sample_data"
 TICKERS: list[str] | None = None
 START_DATE    = "2024-04-01"
 END_DATE      = "2026-03-01"

@@ -1,0 +1,1 @@
+"""get historical data from the market and put it into the database"""

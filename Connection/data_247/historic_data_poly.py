@@ -1,0 +1,1 @@
+"""get historical data from polymarket and put it into the database"""

@@ -7,15 +7,15 @@ from typing import Sequence
 import pandas as pd
 
 import schemas
-from Strategy import BaseStrategy
-from backtest.portfolio import Portfolio
+from strategies.Strategy import BaseStrategy
+from theory_testing.backtest_cointegration.portfolio import Portfolio
 
 log = logging.getLogger(__name__)
 
 
 class BacktestEngine:
     """
-    Multi-strategy backtest engine with per-strategy portfolio isolation.
+    Multi-strategy backtest_cointegration engine with per-strategy portfolio isolation.
 
     Each strategy operates on its own Portfolio instance (seeded at init).
     Pair signals (CointegrationArb) are executed atomically: if the pre-flight
