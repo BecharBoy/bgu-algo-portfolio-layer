@@ -20,6 +20,7 @@ class OllamaClient:
         if not host or not model:
             raise RuntimeError("OLLAMA_HOST and OLLAMA_MODEL must be configured")
         self.model_name = model
+        self._lock = __import__("asyncio").Lock()
         self.client = httpx.AsyncClient(
             base_url=host.rstrip("/"),
             timeout=httpx.Timeout(300),
@@ -34,32 +35,33 @@ class OllamaClient:
         system_prompt: str,
         payload: dict[str, Any],
         response_model: type[T],
-        max_tokens: int = 2000,
+        max_tokens: int = 1000,
     ) -> T:
-        response = await self.client.post(
-            "/api/chat",
-            json={
-                "model": self.model_name,
-                "stream": False,
-                "format": response_model.model_json_schema(),
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": json.dumps(payload, ensure_ascii=False, default=str),
+        async with self._lock:
+            response = await self.client.post(
+                "/api/chat",
+                json={
+                    "model": self.model_name,
+                    "stream": False,
+                    "keep_alive": -1,
+                    "format": response_model.model_json_schema(),
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": json.dumps(payload, ensure_ascii=False, default=str),
+                        },
+                    ],
+                    "options": {
+                        "temperature": 0,
+                        "top_p": 0.1,
+                        "seed": 42,
+                        "num_predict": max_tokens,
                     },
-                ],
-                "options": {
-                    "temperature": 0,
-                    "top_p": 0.1,
-                    "seed": 42,
-                    "num_predict": max_tokens,
                 },
-            },
-        )
+            )
         response.raise_for_status()
         content = response.json().get("message", {}).get("content")
         if not isinstance(content, str):
             raise ValueError("Ollama response is missing message.content")
         return response_model.model_validate_json(content)
-

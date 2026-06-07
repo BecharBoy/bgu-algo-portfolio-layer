@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
+
+Direction = Literal["long", "short"]
+Resolution = Literal["1h", "1d"]
 
 
 @dataclass(frozen=True)
@@ -27,6 +30,7 @@ class SourceMarket:
     tags: list[str]
     raw_market: dict[str, Any]
     yes_token_id: str
+    condition_id: str | None
     final_outcome: str | None
 
 
@@ -34,6 +38,9 @@ class SourceMarket:
 class ProbabilityPoint:
     timestamp: datetime
     probability: float
+    source_timestamp: datetime | None = None
+    available_at: datetime | None = None
+    volume_usdc: float | None = None
 
 
 @dataclass
@@ -84,6 +91,72 @@ class PriceBar:
 
 
 @dataclass
+class MLObservation:
+    observation_id: UUID
+    run_id: UUID
+    event_id: str
+    market_id: str
+    first_pass_number: int
+    first_pass_at: datetime
+    label_available_at: datetime
+    symbol: str
+    event_archetype: str
+    resolution: Resolution
+    features: dict[str, float | None]
+    research_data: dict[str, Any]
+    classification_target: int | None
+    regression_target: float | None
+    valid_for_training: bool
+    exclusion_reason: str | None = None
+
+
+@dataclass
+class MLModelSnapshot:
+    snapshot_id: UUID
+    run_id: UUID
+    symbol: str
+    event_archetype: str
+    training_cutoff: datetime
+    training_event_ids: list[str]
+    training_sample_count: int
+    status: str
+    feature_names: list[str]
+    feature_means: dict[str, float]
+    feature_scales: dict[str, float]
+    classifier_coefficients: dict[str, float] | None
+    classifier_intercept: float | None
+    ridge_coefficients: dict[str, float] | None
+    ridge_intercept: float | None
+    hyperparameters: dict[str, Any]
+    validation_metrics: dict[str, Any]
+
+
+@dataclass
+class MLPrediction:
+    prediction_id: UUID
+    run_id: UUID
+    snapshot_id: UUID | None
+    market_id: str
+    event_id: str
+    pass_number: int
+    symbol: str
+    direction: Direction
+    classification_probability: float | None
+    predicted_peak_percent: float
+    predicted_target_price: float
+    realized_move_at_entry: float
+    remaining_gap: float
+    directions_agree: bool
+    target_reached: bool | None = None
+    target_reached_at: datetime | None = None
+    actual_max_favorable: float | None = None
+    actual_max_adverse: float | None = None
+    actual_direction: str | None = None
+    classification_correct: bool | None = None
+    regression_error: float | None = None
+
+
+@dataclass
 class Trade:
     trade_id: UUID
     run_id: UUID
@@ -102,6 +175,13 @@ class Trade:
     current_stop: float
     highest_price: float
     final_outcome: str | None
+    portfolio: str = "polymarket_momentum"
+    strategy_branch: str = "momentum"
+    resolution: Resolution = "1h"
+    direction: Direction = "long"
+    lowest_price: float | None = None
+    predicted_target_price: float | None = None
+    predicted_target_reached: bool | None = None
     exit_at: datetime | None = None
     exit_price: float | None = None
     exit_commission: float = 0.0
@@ -117,7 +197,8 @@ class Trade:
         price = self.exit_price if self.exit_price is not None else self.final_mark_price
         if price is None:
             return None
-        return (price - self.entry_price) * self.quantity
+        multiplier = 1.0 if self.direction == "long" else -1.0
+        return (price - self.entry_price) * self.quantity * multiplier
 
     @property
     def net_profit(self) -> float | None:
@@ -128,12 +209,16 @@ class Trade:
 
     @property
     def maximum_profit(self) -> float | None:
-        if self.maximum_price is None:
+        price = self.maximum_price if self.direction == "long" else self.minimum_price
+        if price is None:
             return None
-        return (self.maximum_price - self.entry_price) * self.quantity
+        multiplier = 1.0 if self.direction == "long" else -1.0
+        return (price - self.entry_price) * self.quantity * multiplier
 
     @property
     def maximum_loss(self) -> float | None:
-        if self.minimum_price is None:
+        price = self.minimum_price if self.direction == "long" else self.maximum_price
+        if price is None:
             return None
-        return (self.minimum_price - self.entry_price) * self.quantity
+        multiplier = 1.0 if self.direction == "long" else -1.0
+        return (price - self.entry_price) * self.quantity * multiplier

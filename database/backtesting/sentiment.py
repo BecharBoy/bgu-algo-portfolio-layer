@@ -14,12 +14,16 @@ def _load_pipeline() -> Any:
             "FinBERT requires transformers and torch. Install them in the project "
             "environment before running the full backtest."
         ) from exc
-    return pipeline("sentiment-analysis", model="ProsusAI/finbert")
+    import torch
+
+    device = 0 if torch.cuda.is_available() else -1
+    return pipeline("sentiment-analysis", model="ProsusAI/finbert", device=device)
 
 
 class FinbertSentimentAnalyzer:
-    def __init__(self) -> None:
+    def __init__(self, batch_size: int = 32) -> None:
         self._pipeline: Any | None = None
+        self.batch_size = batch_size
 
     async def analyze(self, articles: list[NewsArticle]) -> SentimentResult:
         if not articles:
@@ -33,6 +37,7 @@ class FinbertSentimentAnalyzer:
             texts,
             truncation=True,
             max_length=512,
+            batch_size=self.batch_size,
         )
         details = [
             {
@@ -62,4 +67,3 @@ class FinbertSentimentAnalyzer:
             negative_count=counts["negative"],
             details=details,
         )
-

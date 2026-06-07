@@ -74,8 +74,8 @@ async def candidate_events(
           AND end_at > $1
           AND tags && $5::TEXT[]
           AND NOT (tags && $6::TEXT[])
-          AND end_at > GREATEST(created_at, $1) + ($3 * INTERVAL '1 day')
-          AND end_at <= GREATEST(created_at, $1) + ($4 * INTERVAL '1 day')
+          AND end_at > created_at + ($3 * INTERVAL '1 day')
+          AND end_at <= created_at + ($4 * INTERVAL '1 day')
         ORDER BY created_at, event_id
         """,
         start,
@@ -132,6 +132,7 @@ async def event_markets(
                 tags=event.tags,
                 raw_market=raw,
                 yes_token_id=yes_token,
+                condition_id=raw.get("conditionId") or raw.get("condition_id"),
                 final_outcome=final_outcome,
             )
         )

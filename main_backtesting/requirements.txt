@@ -1,0 +1,8 @@
+asyncpg
+httpx
+matplotlib
+numpy
+pandas
+pydantic
+python-dotenv
+yfinance

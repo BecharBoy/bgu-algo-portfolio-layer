@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from main_backtesting.models import PriceBar, ThresholdPass, Trade
+from main_backtesting.models import Direction, PriceBar, Resolution, ThresholdPass, Trade
 
 
 class ThresholdPassTracker:
@@ -14,17 +14,16 @@ class ThresholdPassTracker:
         self.passes: list[ThresholdPass] = []
 
     def observe(self, timestamp: datetime, probability: float) -> ThresholdPass | None:
-        if probability > self.threshold and not self.is_above:
+        if probability > self.threshold and not self.is_above and not self.passes:
             self.is_above = True
             threshold_pass = ThresholdPass(
                 market_id=self.market_id,
-                pass_number=len(self.passes) + 1,
+                pass_number=1,
                 above_at=timestamp,
                 above_probability=probability,
             )
             self.passes.append(threshold_pass)
             return threshold_pass
-
         if probability <= self.threshold and self.is_above:
             self.is_above = False
             current_pass = self.passes[-1]
@@ -33,30 +32,31 @@ class ThresholdPassTracker:
         return None
 
 
+def rate_of_change(bars: list[PriceBar], lookback: int = 14) -> float | None:
+    if lookback < 1:
+        raise ValueError("Momentum lookback must be positive")
+    if len(bars) <= lookback:
+        return None
+    start = bars[-lookback - 1].close
+    if start <= 0:
+        return None
+    return bars[-1].close / start - 1.0
+
+
 def ib_style_commission(quantity: float, order_value: float) -> float:
     return min(max(quantity * 0.005, 1.0), order_value * 0.01)
 
 
-def true_range(current: PriceBar, previous_close: float) -> float:
-    return max(
-        current.high - current.low,
-        abs(current.high - previous_close),
-        abs(current.low - previous_close),
-    )
-
-
 def average_true_range(previous_bars: list[PriceBar], period: int = 14) -> float | None:
-    if len(previous_bars) < period + 1:
+    """Average high-low range of the previous completed bars."""
+    if len(previous_bars) < period:
         return None
-    selected = previous_bars[-(period + 1) :]
-    ranges = [
-        true_range(selected[index], selected[index - 1].close)
-        for index in range(1, len(selected))
-    ]
+    selected = previous_bars[-period:]
+    ranges = [bar.high - bar.low for bar in selected]
     return sum(ranges) / len(ranges)
 
 
-class EventDrivenLongStrategy:
+class EventDrivenStrategy:
     def __init__(
         self,
         *,
@@ -82,6 +82,11 @@ class EventDrivenLongStrategy:
         entry_bar: PriceBar,
         previous_bars: list[PriceBar],
         final_outcome: str | None,
+        direction: Direction = "long",
+        portfolio: str = "polymarket_momentum",
+        strategy_branch: str = "momentum",
+        resolution: Resolution = "1h",
+        predicted_target_price: float | None = None,
     ) -> Trade | None:
         atr = average_true_range(previous_bars, self.range_period)
         if atr is None or atr <= 0 or entry_bar.open <= 0:
@@ -89,7 +94,11 @@ class EventDrivenLongStrategy:
 
         quantity = self.trade_notional / entry_bar.open
         commission = ib_style_commission(quantity, self.trade_notional)
-        stop = entry_bar.open - self.range_multiplier * atr
+        stop = (
+            entry_bar.open - self.range_multiplier * atr
+            if direction == "long"
+            else entry_bar.open + self.range_multiplier * atr
+        )
         return Trade(
             trade_id=uuid4(),
             run_id=run_id,
@@ -107,7 +116,13 @@ class EventDrivenLongStrategy:
             initial_stop=stop,
             current_stop=stop,
             highest_price=entry_bar.open,
+            lowest_price=entry_bar.open,
             final_outcome=final_outcome,
+            portfolio=portfolio,
+            strategy_branch=strategy_branch,
+            resolution=resolution,
+            direction=direction,
+            predicted_target_price=predicted_target_price,
             maximum_price=entry_bar.open,
             minimum_price=entry_bar.open,
             stop_history=[{"timestamp": entry_bar.timestamp, "stop": stop}],
@@ -117,8 +132,12 @@ class EventDrivenLongStrategy:
         trade.maximum_price = max(trade.maximum_price or bar.high, bar.high)
         trade.minimum_price = min(trade.minimum_price or bar.low, bar.low)
 
-        # The user selected exact-stop fills, even when the hourly bar gaps below.
-        if bar.low <= trade.current_stop:
+        touched = (
+            bar.low <= trade.current_stop
+            if trade.direction == "long"
+            else bar.high >= trade.current_stop
+        )
+        if touched:
             trade.exit_at = bar.timestamp
             trade.exit_price = trade.current_stop
             trade.exit_commission = ib_style_commission(
@@ -132,8 +151,25 @@ class EventDrivenLongStrategy:
         if atr is None or atr <= 0:
             return False
         trade.highest_price = max(trade.highest_price, bar.high)
-        raised_stop = trade.highest_price - self.range_multiplier * atr
-        trade.current_stop = max(trade.current_stop, raised_stop)
+        trade.lowest_price = min(trade.lowest_price or bar.low, bar.low)
+        if trade.direction == "long":
+            candidate = trade.highest_price - self.range_multiplier * atr
+            trade.current_stop = max(trade.current_stop, candidate)
+        else:
+            candidate = trade.lowest_price + self.range_multiplier * atr
+            trade.current_stop = min(trade.current_stop, candidate)
         trade.stop_history.append({"timestamp": bar.timestamp, "stop": trade.current_stop})
         return False
 
+    @staticmethod
+    def close_trade(trade: Trade, *, timestamp: datetime, price: float, reason: str) -> None:
+        trade.exit_at = timestamp
+        trade.exit_price = price
+        trade.exit_commission = ib_style_commission(
+            trade.quantity,
+            trade.quantity * price,
+        )
+        trade.exit_reason = reason
+
+
+EventDrivenLongStrategy = EventDrivenStrategy
