@@ -21,13 +21,19 @@ class BacktestConfig:
     trailing_range_bars: int = 14
     trailing_range_multiplier: float = 3.0
     momentum_lookback_bars: int = 14
+    momentum_lookback_grid: tuple[int, ...] = (5, 7, 12, 14, 18, 21)
+    trailing_range_multiplier_grid: tuple[float, ...] = (1.5, 2.0, 2.5, 3.0)
+    momentum_walk_forward_minimum_samples: int = 30
     polymarket_volume_lookback_hours: int = 24
     polymarket_volume_minimum_history_hours: int = 6
     polymarket_volume_confirmation_ratio: float = 1.0
+    polymarket_volume_minimum_pre_entry_usdc: float = 10.0
+    polymarket_volume_concentration_minimum_usdc: float = 1_000.0
+    polymarket_volume_max_single_hour_share: float = 0.95
     news_lookback: timedelta = timedelta(hours=72)
     max_articles: int = 9
     probability_chunk_days: int = 10
-    minimum_ml_prior_observations: int = 9
+    minimum_ml_prior_observations: int = 8
     gdelt_concurrency: int = 8
     gdelt_minimum_request_interval_seconds: float = 5.5
     article_download_concurrency: int = 12
@@ -37,8 +43,8 @@ class BacktestConfig:
     ollama_sentiment_batch_size: int = 1
     finbert_batch_size: int = 32
     historical_data_cutoff: datetime = datetime(2026, 6, 2, tzinfo=timezone.utc)
-    event_filter_prompt_version: str = "historical-market-filter-v2"
-    asset_world_prompt_version: str = "historical-pass-world-v1"
+    event_filter_prompt_version: str = "historical-market-filter-v3"
+    asset_world_prompt_version: str = "historical-pass-world-v4"
     ollama_sentiment_prompt_version: str = "historical-sentiment-v1"
     output_root: Path = REPO_ROOT / "main_backtesting" / "output" / "runs"
     included_tags: frozenset[str] = field(
@@ -135,6 +141,12 @@ class BacktestConfig:
         parsed["included_tags"] = frozenset(parsed["included_tags"])
         parsed["excluded_tags"] = frozenset(parsed["excluded_tags"])
         parsed["selected_event_ids"] = tuple(parsed.get("selected_event_ids", ()))
+        parsed["momentum_lookback_grid"] = tuple(
+            parsed.get("momentum_lookback_grid", (5, 7, 12, 14, 18, 21))
+        )
+        parsed["trailing_range_multiplier_grid"] = tuple(
+            parsed.get("trailing_range_multiplier_grid", (1.5, 2.0, 2.5, 3.0))
+        )
         return cls(**parsed)
 
 

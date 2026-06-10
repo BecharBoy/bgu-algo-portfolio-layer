@@ -35,9 +35,12 @@ from database.backtesting.repositories.probabilities import (
 )
 
 from database.backtesting.repositories.worlds import (
+    ib_tradable_assets,
+    ib_tradable_symbols,
     reusable_world,
     save_world,
     run_world_assets,
+    run_resolved_world_assets,
     save_world_feedback,
 )
 
@@ -53,9 +56,17 @@ from database.backtesting.repositories.research import (
 from database.backtesting.repositories.prices import (
     save_price_bars,
     price_is_covered,
+    missing_price_windows,
     price_bars,
     save_asset_metadata,
     asset_metadata,
+)
+
+from database.backtesting.repositories.security_master import (
+    security_master_entries,
+    save_security_master_entries,
+    save_run_asset_resolution,
+    run_asset_resolutions,
 )
 
 from database.backtesting.repositories.machine_learning import (
@@ -69,11 +80,23 @@ from database.backtesting.repositories.machine_learning import (
 from database.backtesting.repositories.trades import (
     save_trade,
     run_trade_rows,
+    save_momentum_parameter_results,
+    select_walk_forward_momentum_parameters,
 )
 
 from database.backtesting.repositories.calibration import (
     save_batch_calibration,
     latest_batch_sizes,
+)
+from database.backtesting.repositories.asset_selection_experiments import (
+    asset_selection_experiment,
+    completed_experiment_arms,
+    create_asset_selection_experiment,
+    experiment_queries,
+    save_experiment_queries,
+    save_experiment_result,
+    source_run_experiment_queries,
+    update_asset_selection_experiment,
 )
 
 
@@ -100,9 +123,12 @@ __all__ = [
     "save_run_passes",
     "save_run_market",
     "run_passes",
+    "ib_tradable_assets",
+    "ib_tradable_symbols",
     "reusable_world",
     "save_world",
     "run_world_assets",
+    "run_resolved_world_assets",
     "save_world_feedback",
     "save_article_set",
     "reusable_article_set",
@@ -112,9 +138,14 @@ __all__ = [
     "sentiment_for_job",
     "save_price_bars",
     "price_is_covered",
+    "missing_price_windows",
     "price_bars",
     "save_asset_metadata",
     "asset_metadata",
+    "security_master_entries",
+    "save_security_master_entries",
+    "save_run_asset_resolution",
+    "run_asset_resolutions",
     "save_ml_observation",
     "prior_ml_observations",
     "run_ml_observations",
@@ -122,6 +153,16 @@ __all__ = [
     "save_ml_prediction",
     "save_trade",
     "run_trade_rows",
+    "save_momentum_parameter_results",
+    "select_walk_forward_momentum_parameters",
     "save_batch_calibration",
     "latest_batch_sizes",
+    "asset_selection_experiment",
+    "completed_experiment_arms",
+    "create_asset_selection_experiment",
+    "experiment_queries",
+    "save_experiment_queries",
+    "save_experiment_result",
+    "source_run_experiment_queries",
+    "update_asset_selection_experiment",
 ]

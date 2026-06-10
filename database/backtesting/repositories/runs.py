@@ -160,7 +160,9 @@ async def purge_run(conn: asyncpg.Connection, run_id: UUID) -> str | None:
         return None
     run_specific_tables = [
         "historical_ml_predictions",
+        "historical_momentum_parameter_results",
         "historical_trades",
+        "historical_run_asset_resolutions",
         "historical_run_market_passes",
         "historical_run_markets",
         "historical_run_worlds",

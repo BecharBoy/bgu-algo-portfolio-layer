@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -11,6 +12,8 @@ CLOB_PRICE_HISTORY_URL = "https://clob.polymarket.com/prices-history"
 DATA_TRADES_URL = "https://data-api.polymarket.com/trades"
 DATA_TRADES_PAGE_SIZE = 10_000
 DATA_TRADES_MAX_OFFSET = 10_000
+VOLUME_RETRY_ATTEMPTS = 3
+VOLUME_RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 
 
 def hourly_as_of_points(
@@ -70,6 +73,8 @@ class PolymarketHistoryClient:
             timeout=httpx.Timeout(60),
             headers={"User-Agent": "my-traders-backtest/2.0"},
         )
+        self.volume_status = "unknown"
+        self.volume_error: str | None = None
 
     async def close(self) -> None:
         await self.client.aclose()
@@ -87,6 +92,8 @@ class PolymarketHistoryClient:
             return []
 
         rows: list[tuple[datetime, float]] = []
+        self.volume_status = "unknown"
+        self.volume_error = None
         cursor = history_start
         while cursor < history_end:
             chunk_end = min(cursor + timedelta(days=self.chunk_days), history_end)
@@ -115,6 +122,9 @@ class PolymarketHistoryClient:
             if market.condition_id
             else None
         )
+        if not market.condition_id:
+            self.volume_status = "unavailable"
+            self.volume_error = "market has no condition_id"
         return hourly_as_of_points(
             rows,
             history_end=min(history_end, end),
@@ -127,23 +137,43 @@ class PolymarketHistoryClient:
         condition_id: str,
         start: datetime,
         end: datetime,
-    ) -> list[tuple[datetime, float]]:
+    ) -> list[tuple[datetime, float]] | None:
         rows: list[tuple[datetime, float]] = []
         offset = 0
         while True:
-            response = await self.client.get(
-                DATA_TRADES_URL,
-                params={
-                    "market": condition_id,
-                    "limit": DATA_TRADES_PAGE_SIZE,
-                    "offset": offset,
-                    "takerOnly": "true",
-                },
-            )
-            response.raise_for_status()
+            response = None
+            for attempt in range(VOLUME_RETRY_ATTEMPTS):
+                try:
+                    response = await self.client.get(
+                        DATA_TRADES_URL,
+                        params={
+                            "market": condition_id,
+                            "limit": DATA_TRADES_PAGE_SIZE,
+                            "offset": offset,
+                            "takerOnly": "true",
+                        },
+                    )
+                    if response.status_code not in VOLUME_RETRYABLE_STATUSES:
+                        response.raise_for_status()
+                        break
+                except httpx.HTTPError as error:
+                    if attempt == VOLUME_RETRY_ATTEMPTS - 1:
+                        self.volume_status = "retryable_failure"
+                        self.volume_error = str(error)
+                        return None
+                if attempt < VOLUME_RETRY_ATTEMPTS - 1:
+                    await asyncio.sleep(2 ** attempt)
+            if response is None or response.status_code in VOLUME_RETRYABLE_STATUSES:
+                self.volume_status = "retryable_failure"
+                self.volume_error = (
+                    f"Polymarket volume request failed after {VOLUME_RETRY_ATTEMPTS} attempts"
+                )
+                return None
             batch = response.json()
             if not isinstance(batch, list):
-                raise TypeError("Polymarket Data API trades response must be a list")
+                self.volume_status = "invalid_response"
+                self.volume_error = "Polymarket Data API trades response must be a list"
+                return None
             for item in batch:
                 timestamp = datetime.fromtimestamp(float(item["timestamp"]), tz=timezone.utc)
                 if not start <= timestamp < end:
@@ -152,13 +182,17 @@ class PolymarketHistoryClient:
                 price = float(item.get("price") or 0.0)
                 rows.append((timestamp, max(size * price, 0.0)))
             if len(batch) < DATA_TRADES_PAGE_SIZE:
+                self.volume_status = "complete"
+                self.volume_error = None
                 return rows
             if offset >= DATA_TRADES_MAX_OFFSET:
-                raise RuntimeError(
+                self.volume_status = "incomplete"
+                self.volume_error = (
                     "Polymarket Data API trade history exceeded the supported "
                     f"{DATA_TRADES_MAX_OFFSET + DATA_TRADES_PAGE_SIZE:,}-row window "
-                    f"for condition {condition_id}; refusing to save incomplete volume"
+                    f"for condition {condition_id}"
                 )
+                return None
             offset += DATA_TRADES_PAGE_SIZE
 
 

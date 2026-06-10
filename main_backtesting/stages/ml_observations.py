@@ -11,7 +11,7 @@ from database.backtesting.repositories.machine_learning import (
 from database.backtesting.repositories.prices import asset_metadata, price_bars
 from database.backtesting.repositories.probabilities import probability_history
 from database.backtesting.repositories.runs import finish_work, start_work
-from database.backtesting.repositories.worlds import run_world_assets
+from database.backtesting.repositories.worlds import run_resolved_world_assets
 from database.backtesting.polymarket import probability_as_of
 from main_backtesting.utils import event_archetype
 from strategies.event_driven_ml import DAILY_SESSION_LENGTH, build_observation, return_between, train_snapshot
@@ -22,7 +22,7 @@ from main_backtesting.stages.event_filter import accepted_markets, run_events
 async def run(self, conn: Any) -> None:
     events = {event.event_id: event for event in await run_events(self, conn)}
     markets = {market.market_id: market for market in await accepted_markets(self, conn)}
-    world_rows = list(await run_world_assets(conn, self.run_id))
+    world_rows = list(await run_resolved_world_assets(conn, self.run_id))
     first_by_event_asset: dict[tuple[str, str], Any] = {}
     for row in world_rows:
         key = (row["event_id"], row["symbol"])
@@ -42,10 +42,29 @@ async def run(self, conn: Any) -> None:
             continue
         market = markets[row["market_id"]]
         event = events[event_id]
+        archetype = event_archetype(
+            market.tags,
+            question=market.question,
+            symbol=symbol,
+        )
+        if archetype is None:
+            await finish_work(
+                conn,
+                run_id=self.run_id,
+                stage="ml_observations",
+                work_key=self.current_work_key,
+                result={
+                    "valid_for_training": False,
+                    "exclusion_reason": "no_defined_semantic_ml_archetype",
+                },
+            )
+            continue
         metadata = await asset_metadata(conn, symbol)
-        sector_etf = metadata["sector_etf"] if metadata else None
+        asset_benchmark = metadata["benchmark_symbol"] if metadata else None
+        year_start = datetime(row["as_of"].year, 1, 1, tzinfo=timezone.utc)
         daily_start = min(
-            datetime(row["as_of"].year, 1, 1, tzinfo=timezone.utc),
+            year_start - timedelta(days=40),
+            row["as_of"] - timedelta(days=40),
             event.created_at,
         )
         daily_end = min(
@@ -61,12 +80,12 @@ async def run(self, conn: Any) -> None:
         sector_daily = (
             await price_bars(
                 conn,
-                symbol=sector_etf,
+                symbol=asset_benchmark,
                 resolution="1d",
                 start=daily_start,
                 end=daily_end,
             )
-            if sector_etf
+            if asset_benchmark
             else []
         )
         probabilities = await probability_history(
@@ -76,7 +95,7 @@ async def run(self, conn: Any) -> None:
             end=min(self.config.end, market.end_at),
         )
         benchmark_returns: dict[str, float | None] = {}
-        for benchmark_symbol in ["SPY", "QQQ", "IWM", "TLT", sector_etf]:
+        for benchmark_symbol in ["SPY", "QQQ", "IWM", "TLT", asset_benchmark]:
             if not benchmark_symbol or benchmark_symbol in benchmark_returns:
                 continue
             benchmark_bars = await price_bars(
@@ -113,7 +132,7 @@ async def run(self, conn: Any) -> None:
             event_end_at=event.end_at,
             label_data_cutoff=self.config.historical_data_cutoff,
             symbol=symbol,
-            event_archetype=event_archetype(market.tags),
+            event_archetype=archetype,
             resolution="1h" if row["as_of"] >= self.hourly_boundary else "1d",
             asset_daily=asset_daily,
             sector_daily=sector_daily,
@@ -139,7 +158,7 @@ async def run(self, conn: Any) -> None:
                     completed_asset_bars[-1].volume if completed_asset_bars else None
                 ),
                 "price_path_reference": {"symbol": symbol, "resolution": "1d"},
-                "benchmark_references": ["SPY", "QQQ", "IWM", "TLT", sector_etf],
+                "benchmark_references": ["SPY", "QQQ", "IWM", "TLT", asset_benchmark],
                 "benchmark_two_week_returns": benchmark_returns,
             },
         )
@@ -185,7 +204,7 @@ async def run(self, conn: Any) -> None:
             observations=completed,
             minimum_prior_observations=self.config.minimum_ml_prior_observations,
         )
-        await save_model_snapshot(conn, snapshot)
+        snapshot.snapshot_id = await save_model_snapshot(conn, snapshot)
         await finish_work(
             conn,
             run_id=self.run_id,

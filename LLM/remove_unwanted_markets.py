@@ -6,6 +6,23 @@ from LLM.ollama_client import OllamaClient
 from main_backtesting.models import SourceEvent, SourceMarket
 
 
+def is_speech_word_market(question: str) -> bool:
+    normalized = question.lower()
+    speech_verb = any(
+        phrase in normalized
+        for phrase in (" say ", " says ", " mention", " use the word", " utter")
+    )
+    word_bet_marker = (
+        '"' in question
+        or "'" in question
+        or "during" in normalized
+        or " times" in normalized
+        or " word" in normalized
+        or "phrase" in normalized
+    )
+    return speech_verb and word_bet_marker
+
+
 class EventRelevanceDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -39,8 +56,11 @@ traded stocks or equity ETFs through a concrete economic channel.
 
 Accept macroeconomic releases, central banks, corporate events, regulation, major
 geopolitical shocks, trade, energy supply, and events with direct company exposure.
+Keep company earnings-beat questions. Keep geopolitical questions when a plausible
+economic transmission channel exists; the separate asset router will decide the assets.
 Reject sports, entertainment, celebrity trivia, generic politics without an economic
-channel, mechanical stock-price target markets, and crypto-only events.
+channel, mechanical stock-price target markets, crypto-only events, and markets that bet
+on whether a person will say or mention particular words or phrases.
 
 Do not predict the event outcome. Return only the supplied JSON schema.
 """.strip()
@@ -156,6 +176,18 @@ async def classify_markets(
 ) -> list[BatchedMarketDecision]:
     if not markets:
         return []
+    speech_markets = [market for market in markets if is_speech_word_market(market.question)]
+    remaining = [market for market in markets if not is_speech_word_market(market.question)]
+    if speech_markets:
+        rejected = [
+            BatchedMarketDecision(
+                market_id=market.market_id,
+                relevant_to_financial_markets=False,
+                reason="Speech-word prediction markets are excluded from this strategy.",
+            )
+            for market in speech_markets
+        ]
+        return rejected + await classify_markets(ollama, remaining)
     if len(markets) == 1:
         return [await _classify_single_market(ollama, markets[0])]
     try:
@@ -204,4 +236,3 @@ async def classify_markets(
         left = await classify_markets(ollama, markets[:mid])
         right = await classify_markets(ollama, markets[mid:])
         return left + right
-

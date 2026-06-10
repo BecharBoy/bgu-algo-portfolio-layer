@@ -12,6 +12,7 @@ from database.backtesting.repository import candidate_events, event_markets
 from database.backtesting.schema import initialize_historical_schema
 from database.db_connection import connect
 from main_backtesting.calibration import calibrate_batches
+from main_backtesting.asset_selection_experiment import run_asset_selection_experiment
 from main_backtesting.config import BacktestConfig
 from main_backtesting.engine import STAGES, HistoricalBacktestEngine, purge_historical_run
 from main_backtesting.reporting import generate_run_reports
@@ -91,6 +92,19 @@ def build_parser() -> argparse.ArgumentParser:
         "calibrate-batches",
         help="Test increasing Ollama batch sizes once and save the largest valid sizes.",
     )
+    asset_selection_ab = commands.add_parser(
+        "asset-selection-ab",
+        help="Run a paired bounded A/B test of two LLM asset-selection methods.",
+    )
+    asset_selection_ab.add_argument("--source-run-id", type=UUID, required=True)
+    asset_selection_ab.add_argument("--limit", type=int, default=1000)
+    asset_selection_ab.add_argument("--seed", type=int, default=42)
+
+    resume_asset_selection_ab = commands.add_parser(
+        "resume-asset-selection-ab",
+        help="Resume an interrupted paired LLM asset-selection A/B test.",
+    )
+    resume_asset_selection_ab.add_argument("--experiment-id", type=UUID, required=True)
     return parser
 
 
@@ -147,6 +161,24 @@ async def main_async() -> None:
     if args.command == "calibrate-batches":
         selected = await calibrate_batches(config)
         print(f"[calibration complete] {selected}")
+        return
+    if args.command == "asset-selection-ab":
+        experiment_id = await run_asset_selection_experiment(
+            source_run_id=args.source_run_id,
+            experiment_id=None,
+            query_limit=args.limit,
+            sample_seed=args.seed,
+        )
+        print(f"[asset-selection A/B complete] experiment_id={experiment_id}")
+        return
+    if args.command == "resume-asset-selection-ab":
+        experiment_id = await run_asset_selection_experiment(
+            source_run_id=None,
+            experiment_id=args.experiment_id,
+            query_limit=1,
+            sample_seed=0,
+        )
+        print(f"[asset-selection A/B complete] experiment_id={experiment_id}")
         return
     if args.command == "list-candidates":
         config = replace(config, start=args.start, end=args.end)

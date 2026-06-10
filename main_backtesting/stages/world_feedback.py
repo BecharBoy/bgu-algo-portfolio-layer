@@ -6,7 +6,7 @@ import numpy as np
 from database.backtesting.repositories.prices import asset_metadata, price_bars
 from database.backtesting.repositories.probabilities import probability_history
 from database.backtesting.repositories.runs import finish_work, start_work
-from database.backtesting.repositories.worlds import run_world_assets, save_world_feedback
+from database.backtesting.repositories.worlds import run_resolved_world_assets, save_world_feedback
 from database.backtesting.polymarket import probability_as_of
 from main_backtesting.models import PriceBar
 from strategies.event_driven_ml import DAILY_SESSION_LENGTH
@@ -17,7 +17,7 @@ from main_backtesting.stages.event_filter import accepted_markets, run_events
 async def run(self, conn: Any) -> None:
     events = {event.event_id: event for event in await run_events(self, conn)}
     markets = {market.market_id: market for market in await accepted_markets(self, conn)}
-    for row in await run_world_assets(conn, self.run_id):
+    for row in await run_resolved_world_assets(conn, self.run_id):
         work_key = f"{row['world_id']}:{row['symbol']}"
         self.current_work_key = work_key
         if not await start_work(

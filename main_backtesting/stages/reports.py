@@ -27,10 +27,15 @@ async def run(self, conn: Any) -> None:
         SELECT
             (SELECT COUNT(*) FROM checking_relevant_events.historical_run_market_passes
              WHERE run_id=$1) AS pass_count,
-            (SELECT COUNT(*) FROM checking_relevant_events.historical_run_worlds rw
+            (SELECT COUNT(*) FROM (
+             SELECT DISTINCT rw.market_id, rw.pass_number, r.resolved_symbol
+             FROM checking_relevant_events.historical_run_worlds rw
              JOIN checking_relevant_events.historical_asset_world_assets a
                ON a.world_id=rw.world_id
-             WHERE rw.run_id=$1) AS asset_candidate_count,
+             JOIN checking_relevant_events.historical_run_asset_resolutions r
+               ON r.run_id=rw.run_id AND r.original_symbol=a.symbol
+             WHERE rw.run_id=$1 AND r.resolved_symbol IS NOT NULL
+            ) resolved_assets) AS asset_candidate_count,
             (SELECT COUNT(*) FROM checking_relevant_events.historical_backtest_stage_work
              WHERE run_id=$1 AND stage='simulation' AND status='complete')
                 AS completed_simulation_count

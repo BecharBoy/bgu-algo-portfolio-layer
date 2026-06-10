@@ -84,7 +84,6 @@ class HistoricalBacktestEngine:
 
     async def run(self, *, resume: bool = False) -> UUID:
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        (self.run_dir / "graphs" / "markets").mkdir(parents=True, exist_ok=True)
         (self.run_dir / "graphs" / "trades").mkdir(parents=True, exist_ok=True)
         (self.run_dir / "logs").mkdir(parents=True, exist_ok=True)
         conn = await connect()

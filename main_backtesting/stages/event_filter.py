@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import csv
+import os
 from typing import Any
-from database.backtesting.repositories import json_value
 from database.backtesting.repositories.market_decisions import (
     accepted_market_ids,
+    link_run_market_decision,
     reusable_market_decision,
+    reusable_market_decision_for_market,
     save_market_decision,
 )
 from database.backtesting.repositories.runs import finish_work, start_work
@@ -29,6 +32,7 @@ async def write_deleted_market_log(self, conn: Any) -> None:
         self.run_id,
     )
     path = self.run_dir / "logs" / "deleted_non_relevant_markets.csv"
+    pending_path = path.with_suffix(".pending.csv")
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
         "market_id",
@@ -40,11 +44,23 @@ async def write_deleted_market_log(self, conn: Any) -> None:
         "prompt_version",
         "processed_at",
     ]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(dict(row))
+    for attempt in range(3):
+        try:
+            with pending_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=columns)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow(dict(row))
+            os.replace(pending_path, path)
+            return
+        except OSError as error:
+            if attempt == 2:
+                print(
+                    f"[market-filter log warning] could not replace {path}: {error}; "
+                    f"latest complete log remains at {pending_path}"
+                )
+                return
+            await asyncio.sleep(2 ** attempt)
 
 
 async def run_events(self, conn: Any) -> list[SourceEvent]:
@@ -137,44 +153,37 @@ async def run(self, conn: Any) -> None:
             for market in batch
         }
         cached = {
-            market.market_id: await reusable_market_decision(
-                conn, identities[market.market_id]
+            market.market_id: (
+                await reusable_market_decision(conn, identities[market.market_id])
+                or await reusable_market_decision_for_market(
+                    conn,
+                    market_id=market.market_id,
+                    model_name=self.ollama.model_name,
+                    prompt_version=self.config.event_filter_prompt_version,
+                )
             )
             for market in batch
         }
-        cached_count = sum(item is not None for item in cached.values())
-        if cached_count not in {0, len(batch)}:
-            raise RuntimeError(
-                f"Partial exact event-filter batch cache for {self.current_work_key}"
-            )
-        if cached_count == len(batch):
+        cached_markets = [market for market in batch if cached[market.market_id] is not None]
+        missing_markets = [market for market in batch if cached[market.market_id] is None]
+        if cached_markets:
             async with conn.transaction():
-                for market in batch:
+                for market in cached_markets:
                     item = cached[market.market_id]
-                    identity = identities[market.market_id]
-                    await save_market_decision(
+                    await link_run_market_decision(
                         conn,
                         run_id=self.run_id,
-                        input_hash=identity,
                         market_id=market.market_id,
-                        event_id=market.event_id,
-                        event_title=market.event_title,
-                        market_question=market.question,
-                        model_name=item["model_name"],
-                        prompt_version=item["prompt_version"],
-                        llm_input=json_value(item["llm_input"]),
-                        llm_output=json_value(item["llm_output"]),
-                        relevant=item["relevant"],
-                        reason=item["reason"],
+                        input_hash=item["input_hash"],
                     )
-        else:
-            decisions = await classify_markets(self.ollama, batch)
+        if missing_markets:
+            decisions = await classify_markets(self.ollama, missing_markets)
             by_id = {item.market_id: item for item in decisions}
             batch_llm_output = {
                 "decisions": [decision.model_dump(mode="json") for decision in decisions]
             }
             async with conn.transaction():
-                for market in batch:
+                for market in missing_markets:
                     decision = by_id[market.market_id]
                     await save_market_decision(
                         conn,
@@ -198,5 +207,5 @@ async def run(self, conn: Any) -> None:
             work_key=self.current_work_key,
             result={"market_count": len(batch)},
         )
-        await write_deleted_market_log(self, conn)
         print(f"[market-filter batch {batch_index}] markets={len(batch)}")
+    await write_deleted_market_log(self, conn)

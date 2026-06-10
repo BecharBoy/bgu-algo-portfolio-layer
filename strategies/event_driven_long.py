@@ -48,11 +48,19 @@ def ib_style_commission(quantity: float, order_value: float) -> float:
 
 
 def average_true_range(previous_bars: list[PriceBar], period: int = 14) -> float | None:
-    """Average high-low range of the previous completed bars."""
-    if len(previous_bars) < period:
+    """Average true range over completed bars, including overnight gaps."""
+    if len(previous_bars) <= period:
         return None
     selected = previous_bars[-period:]
-    ranges = [bar.high - bar.low for bar in selected]
+    prior = previous_bars[-period - 1 : -1]
+    ranges = [
+        max(
+            bar.high - bar.low,
+            abs(bar.high - previous.close),
+            abs(bar.low - previous.close),
+        )
+        for previous, bar in zip(prior, selected)
+    ]
     return sum(ranges) / len(ranges)
 
 
@@ -123,6 +131,8 @@ class EventDrivenStrategy:
             resolution=resolution,
             direction=direction,
             predicted_target_price=predicted_target_price,
+            range_period=self.range_period,
+            range_multiplier=self.range_multiplier,
             maximum_price=entry_bar.open,
             minimum_price=entry_bar.open,
             stop_history=[{"timestamp": entry_bar.timestamp, "stop": stop}],
@@ -132,14 +142,19 @@ class EventDrivenStrategy:
         trade.maximum_price = max(trade.maximum_price or bar.high, bar.high)
         trade.minimum_price = min(trade.minimum_price or bar.low, bar.low)
 
-        touched = (
+        gap_through = (
+            bar.open <= trade.current_stop
+            if trade.direction == "long"
+            else bar.open >= trade.current_stop
+        )
+        touched = gap_through or (
             bar.low <= trade.current_stop
             if trade.direction == "long"
             else bar.high >= trade.current_stop
         )
         if touched:
             trade.exit_at = bar.timestamp
-            trade.exit_price = trade.current_stop
+            trade.exit_price = bar.open if gap_through else trade.current_stop
             trade.exit_commission = ib_style_commission(
                 trade.quantity,
                 trade.quantity * trade.exit_price,
@@ -147,11 +162,13 @@ class EventDrivenStrategy:
             trade.exit_reason = "trailing_stop"
             return True
 
-        atr = average_true_range(previous_bars, self.range_period)
+        completed = previous_bars + [bar]
+        atr = average_true_range(completed, self.range_period)
         if atr is None or atr <= 0:
             return False
-        trade.highest_price = max(trade.highest_price, bar.high)
-        trade.lowest_price = min(trade.lowest_price or bar.low, bar.low)
+        rolling = completed[-self.range_period :]
+        trade.highest_price = max(item.high for item in rolling)
+        trade.lowest_price = min(item.low for item in rolling)
         if trade.direction == "long":
             candidate = trade.highest_price - self.range_multiplier * atr
             trade.current_stop = max(trade.current_stop, candidate)

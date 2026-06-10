@@ -114,8 +114,8 @@ async def run_ml_observations(conn: asyncpg.Connection, run_id: UUID) -> list[ML
     ]
 
 
-async def save_model_snapshot(conn: asyncpg.Connection, item: MLModelSnapshot) -> None:
-    await conn.execute(
+async def save_model_snapshot(conn: asyncpg.Connection, item: MLModelSnapshot) -> UUID:
+    snapshot_id = await conn.fetchval(
         f"""
         INSERT INTO {SCHEMA}.historical_ml_model_snapshots (
             snapshot_id, run_id, symbol, event_archetype, training_cutoff,
@@ -128,7 +128,9 @@ async def save_model_snapshot(conn: asyncpg.Connection, item: MLModelSnapshot) -
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::JSONB,$11::JSONB,$12::JSONB,
             $13,$14::JSONB,$15,$16::JSONB,$17::JSONB
         )
-        ON CONFLICT (run_id, symbol, event_archetype, training_cutoff) DO NOTHING
+        ON CONFLICT (run_id, symbol, event_archetype, training_cutoff) DO UPDATE SET
+            snapshot_id = {SCHEMA}.historical_ml_model_snapshots.snapshot_id
+        RETURNING snapshot_id
         """,
         item.snapshot_id,
         item.run_id,
@@ -148,6 +150,7 @@ async def save_model_snapshot(conn: asyncpg.Connection, item: MLModelSnapshot) -
         json_text(item.hyperparameters),
         json_text(item.validation_metrics),
     )
+    return snapshot_id
 
 
 async def save_ml_prediction(conn: asyncpg.Connection, item: MLPrediction) -> None:
@@ -161,6 +164,22 @@ async def save_ml_prediction(conn: asyncpg.Connection, item: MLPrediction) -> No
             actual_max_adverse, actual_direction, classification_correct, regression_error
         )
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+        ON CONFLICT (run_id, market_id, pass_number, symbol) DO UPDATE SET
+            snapshot_id = EXCLUDED.snapshot_id,
+            direction = EXCLUDED.direction,
+            classification_probability = EXCLUDED.classification_probability,
+            predicted_peak_percent = EXCLUDED.predicted_peak_percent,
+            predicted_target_price = EXCLUDED.predicted_target_price,
+            realized_move_at_entry = EXCLUDED.realized_move_at_entry,
+            remaining_gap = EXCLUDED.remaining_gap,
+            directions_agree = EXCLUDED.directions_agree,
+            target_reached = EXCLUDED.target_reached,
+            target_reached_at = EXCLUDED.target_reached_at,
+            actual_max_favorable = EXCLUDED.actual_max_favorable,
+            actual_max_adverse = EXCLUDED.actual_max_adverse,
+            actual_direction = EXCLUDED.actual_direction,
+            classification_correct = EXCLUDED.classification_correct,
+            regression_error = EXCLUDED.regression_error
         """,
         item.prediction_id,
         item.run_id,

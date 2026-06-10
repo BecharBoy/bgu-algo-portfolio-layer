@@ -15,6 +15,8 @@ async def save_probability_history(
     requested_start: datetime,
     requested_end: datetime,
     points: list[ProbabilityPoint],
+    volume_status: str = "unknown",
+    volume_error: str | None = None,
 ) -> None:
     if points:
         await conn.executemany(
@@ -48,15 +50,17 @@ async def save_probability_history(
         f"""
         INSERT INTO {SCHEMA}.historical_probability_coverage (
             market_id, yes_token_id, requested_start, requested_end,
-            first_hour, last_hour, row_count
+            first_hour, last_hour, row_count, volume_status, volume_error
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         ON CONFLICT (market_id) DO UPDATE SET
             requested_start = LEAST({SCHEMA}.historical_probability_coverage.requested_start, EXCLUDED.requested_start),
             requested_end = GREATEST({SCHEMA}.historical_probability_coverage.requested_end, EXCLUDED.requested_end),
             first_hour = LEAST({SCHEMA}.historical_probability_coverage.first_hour, EXCLUDED.first_hour),
             last_hour = GREATEST({SCHEMA}.historical_probability_coverage.last_hour, EXCLUDED.last_hour),
             row_count = EXCLUDED.row_count,
+            volume_status = EXCLUDED.volume_status,
+            volume_error = EXCLUDED.volume_error,
             completed_at = NOW()
         """,
         market.market_id,
@@ -66,6 +70,8 @@ async def save_probability_history(
         points[0].timestamp if points else None,
         points[-1].timestamp if points else None,
         len(points),
+        volume_status,
+        volume_error,
     )
 
 

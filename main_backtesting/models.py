@@ -62,6 +62,32 @@ class Asset:
 
 
 @dataclass(frozen=True)
+class IBTradableAsset:
+    symbol: str
+    asset_name: str
+    asset_class: Literal["stock", "etf"]
+    primary_exchange: str
+    stock_type: str
+    industry: str | None = None
+    category: str | None = None
+    subcategory: str | None = None
+
+    def prompt_record(self) -> dict[str, str]:
+        record = {
+            "symbol": self.symbol,
+            "asset_name": self.asset_name,
+            "asset_class": self.asset_class,
+            "primary_exchange": self.primary_exchange,
+            "stock_type": self.stock_type,
+        }
+        for field_name in ("industry", "category", "subcategory"):
+            value = getattr(self, field_name)
+            if value:
+                record[field_name] = value
+        return record
+
+
+@dataclass(frozen=True)
 class NewsArticle:
     url: str
     title: str
@@ -182,6 +208,9 @@ class Trade:
     lowest_price: float | None = None
     predicted_target_price: float | None = None
     predicted_target_reached: bool | None = None
+    range_period: int | None = None
+    range_multiplier: float | None = None
+    parameter_selection: dict[str, Any] = field(default_factory=dict)
     exit_at: datetime | None = None
     exit_price: float | None = None
     exit_commission: float = 0.0

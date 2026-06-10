@@ -10,7 +10,6 @@ from database.backtesting.repositories.probabilities import (
 )
 from database.backtesting.repositories.runs import finish_work, start_work
 from main_backtesting.models import ProbabilityPoint, ThresholdPass
-from main_backtesting.reporting import create_probability_graph
 from strategies.event_driven_long import ThresholdPassTracker
 
 from main_backtesting.stages.event_filter import accepted_markets
@@ -52,24 +51,17 @@ async def run(self, conn: Any) -> None:
                 requested_start=start,
                 requested_end=end,
                 points=points,
+                volume_status=self.polymarket.volume_status,
+                volume_error=self.polymarket.volume_error,
             )
         passes = detect_passes(market.market_id, points, self.config.threshold)
         await save_run_passes(conn, run_id=self.run_id, market=market, passes=passes)
-        graph_path = create_probability_graph(
-            market_id=market.market_id,
-            question=market.question,
-            probabilities=points,
-            passes=passes,
-            event_end=market.end_at,
-            final_outcome=market.final_outcome,
-            graph_dir=self.run_dir / "graphs" / "markets",
-        )
         await save_run_market(
             conn,
             run_id=self.run_id,
             market=market,
             probability_hour_count=len(points),
-            probability_graph_path=str(graph_path),
+            probability_graph_path="",
         )
         await finish_work(
             conn,
@@ -79,7 +71,8 @@ async def run(self, conn: Any) -> None:
             result={
                 "hour_count": len(points),
                 "pass_count": len(passes),
-                "graph_path": str(graph_path),
+                "volume_status": self.polymarket.volume_status,
+                "volume_error": self.polymarket.volume_error,
             },
         )
         print(f"[probability] market={market.market_id} hours={len(points)} passes={len(passes)}")

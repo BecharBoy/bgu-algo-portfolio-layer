@@ -43,27 +43,37 @@ def return_between(bars: list[PriceBar], start: datetime, end: datetime) -> floa
 def observation_targets(
     bars: list[PriceBar],
     *,
-    start: datetime,
+    event_start: datetime,
+    peak_window_start: datetime,
     end: datetime,
 ) -> tuple[int | None, float | None, dict[str, Any]]:
-    window = [
+    event_window = [
         bar
         for bar in bars
-        if start <= bar.timestamp and bar.timestamp + DAILY_SESSION_LENGTH <= end
+        if event_start <= bar.timestamp and bar.timestamp + DAILY_SESSION_LENGTH <= end
     ]
-    if not window or window[0].open <= 0:
+    peak_window = [
+        bar
+        for bar in event_window
+        if peak_window_start <= bar.timestamp
+    ]
+    if not event_window or event_window[0].open <= 0:
         return None, None, {"reason": "missing_event_price_path"}
-    opening = window[0].open
-    above = sum(bar.close > opening for bar in window)
-    below_or_equal = len(window) - above
+    if not peak_window:
+        return None, None, {"reason": "missing_post_threshold_price_path"}
+    opening = event_window[0].open
+    above = sum(bar.close > opening for bar in event_window)
+    below_or_equal = len(event_window) - above
     direction = 1 if above > below_or_equal else -1
-    changes = [(bar.close / opening) - 1.0 for bar in window]
-    signed_peak = max(changes) if direction == 1 else min(changes)
+    maximum_change = max((bar.high / opening) - 1.0 for bar in peak_window)
+    minimum_change = min((bar.low / opening) - 1.0 for bar in peak_window)
+    signed_peak = maximum_change if direction == 1 else minimum_change
     return direction, signed_peak, {
         "event_open_price": opening,
-        "event_path_rows": len(window),
-        "maximum_change": max(changes),
-        "minimum_change": min(changes),
+        "event_path_rows": len(event_window),
+        "post_threshold_path_rows": len(peak_window),
+        "maximum_change": maximum_change,
+        "minimum_change": minimum_change,
         "majority_above_count": above,
         "majority_below_or_equal_count": below_or_equal,
     }
@@ -120,7 +130,8 @@ def build_observation(
     else:
         target_direction, target_magnitude, target_data = observation_targets(
             asset_daily,
-            start=event_created_at,
+            event_start=event_created_at,
+            peak_window_start=first_pass_at,
             end=event_end_at,
         )
     missing = [name for name, value in features.items() if value is None]
@@ -312,7 +323,7 @@ def predict(
     symbol: str,
     features: dict[str, float | None],
     event_open_price: float,
-    realized_price_at_pass: float,
+    realized_price_at_entry: float,
 ) -> MLPrediction | None:
     if snapshot.status != "trained":
         return None
@@ -334,8 +345,9 @@ def predict(
     directions_agree = (direction == "long" and predicted_peak > 0) or (
         direction == "short" and predicted_peak < 0
     )
-    realized = realized_price_at_pass / event_open_price - 1.0
-    gap = abs(predicted_peak) - abs(realized)
+    realized = realized_price_at_entry / event_open_price - 1.0
+    directional_realized = realized if direction == "long" else -realized
+    gap = abs(predicted_peak) - directional_realized
     target_price = event_open_price * (1.0 + predicted_peak)
     return MLPrediction(
         prediction_id=uuid4(),

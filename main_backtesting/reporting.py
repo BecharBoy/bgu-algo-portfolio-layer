@@ -4,7 +4,7 @@ import csv
 import json
 import math
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -19,6 +19,10 @@ import matplotlib.pyplot as plt
 from main_backtesting.models import PriceBar, ProbabilityPoint, ThresholdPass, Trade
 
 SCHEMA = "checking_relevant_events"
+
+
+def matplotlib_literal_text(value: object) -> str:
+    return str(value).replace("$", r"\$")
 
 
 def create_probability_graph(
@@ -52,7 +56,10 @@ def create_probability_graph(
     axis.set_ylim(0, 100)
     axis.set_ylabel("Polymarket Yes probability (%)")
     axis.set_xlabel("UTC time")
-    axis.set_title(f"{question}\nFinal result: {final_outcome or 'unknown'}")
+    axis.set_title(
+        f"{matplotlib_literal_text(question)}\n"
+        f"Final result: {matplotlib_literal_text(final_outcome or 'unknown')}"
+    )
     axis.grid(alpha=0.25)
     axis.legend(loc="best")
     figure.autofmt_xdate()
@@ -73,7 +80,7 @@ def create_trade_graph(
     graph_dir: Path,
     event_end: datetime | None = None,
 ) -> Path:
-    graph_end = event_end or trade.exit_at or simulation_end
+    graph_end = event_end + timedelta(days=3) if event_end else trade.exit_at or simulation_end
     trade_bars = [bar for bar in bars if trade.entry_at <= bar.timestamp <= graph_end]
     probability_points = [
         point for point in probabilities if trade.entry_at <= point.timestamp <= graph_end
@@ -212,6 +219,125 @@ def _write_records_csv(path: Path, rows: list[Any]) -> None:
             )
 
 
+def _performance_summary(values: list[float]) -> dict[str, float | int | None]:
+    wins = [value for value in values if value > 0]
+    losses = [value for value in values if value < 0]
+    average_win = sum(wins) / len(wins) if wins else None
+    average_loss = sum(losses) / len(losses) if losses else None
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    consecutive = maximum_consecutive = 0
+    for value in values:
+        consecutive = consecutive + 1 if value < 0 else 0
+        maximum_consecutive = max(maximum_consecutive, consecutive)
+    return {
+        "trade_count": len(values),
+        "total_net_profit": sum(values),
+        "win_rate": len(wins) / len(values) if values else None,
+        "average_winner": average_win,
+        "average_loser": average_loss,
+        "payoff_ratio": (
+            average_win / abs(average_loss)
+            if average_win is not None and average_loss not in {None, 0}
+            else None
+        ),
+        "profit_factor": gross_profit / gross_loss if gross_loss else None,
+        "expectancy": sum(values) / len(values) if values else None,
+        "maximum_consecutive_losses": maximum_consecutive,
+    }
+
+
+def _group_performance(rows: list[Any], key: str) -> list[dict[str, Any]]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row[key] if row[key] is not None else "unknown")].append(
+            float(row["net_profit"] or 0.0)
+        )
+    return [
+        {key: value, **_performance_summary(profits)}
+        for value, profits in sorted(grouped.items())
+    ]
+
+
+def _daily_portfolio_metrics(
+    trades: list[Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    pnl_by_day: dict[date, float] = defaultdict(float)
+    notional_by_day: dict[date, float] = defaultdict(float)
+    for trade in trades:
+        realized_at = trade["exit_at"] or trade["entry_at"]
+        day = realized_at.date()
+        pnl_by_day[day] += float(trade["net_profit"] or 0.0)
+        notional_by_day[day] += 1_000.0
+    daily_rows: list[dict[str, Any]] = []
+    cumulative = peak = 0.0
+    maximum_drawdown = 0.0
+    returns: list[float] = []
+    if pnl_by_day:
+        cursor = min(pnl_by_day)
+        final_day = max(pnl_by_day)
+    else:
+        cursor = final_day = None
+    while cursor is not None and final_day is not None and cursor <= final_day:
+        if cursor.weekday() >= 5:
+            cursor += timedelta(days=1)
+            continue
+        pnl = pnl_by_day.get(cursor, 0.0)
+        cumulative += pnl
+        peak = max(peak, cumulative)
+        drawdown = cumulative - peak
+        maximum_drawdown = min(maximum_drawdown, drawdown)
+        realized_notional = notional_by_day.get(cursor, 0.0)
+        daily_return = pnl / realized_notional if realized_notional else 0.0
+        returns.append(daily_return)
+        daily_rows.append(
+            {
+                "date": cursor.isoformat(),
+                "realized_daily_pnl": pnl,
+                "realized_signal_notional": realized_notional,
+                "daily_return": daily_return,
+                "cumulative_pnl": cumulative,
+                "drawdown": drawdown,
+            }
+        )
+        cursor += timedelta(days=1)
+    mean_return = sum(returns) / len(returns) if returns else None
+    variance = (
+        sum((value - mean_return) ** 2 for value in returns) / len(returns)
+        if returns and mean_return is not None
+        else None
+    )
+    downside = [min(value, 0.0) for value in returns]
+    downside_variance = (
+        sum(value * value for value in downside) / len(downside) if downside else None
+    )
+    sharpe = (
+        mean_return / math.sqrt(variance) * math.sqrt(252)
+        if mean_return is not None and variance and variance > 0
+        else None
+    )
+    sortino = (
+        mean_return / math.sqrt(downside_variance) * math.sqrt(252)
+        if mean_return is not None and downside_variance and downside_variance > 0
+        else None
+    )
+    total_notional = len(trades) * 1_000.0
+    return (
+        {
+            "method": "daily_realized_executable_trade_returns",
+            "daily_realized_days": len(daily_rows),
+            "sharpe_ratio": sharpe,
+            "sortino_ratio": sortino,
+            "maximum_drawdown_dollars": maximum_drawdown,
+            "maximum_drawdown_percent_of_total_signal_notional": (
+                maximum_drawdown / total_notional if total_notional else None
+            ),
+            "total_signal_notional": total_notional,
+        },
+        daily_rows,
+    )
+
+
 async def generate_run_reports(
     conn: asyncpg.Connection,
     *,
@@ -224,9 +350,9 @@ async def generate_run_reports(
         "trades.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 ORDER BY entry_at",
         "trades_hourly.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 AND resolution='1h' ORDER BY entry_at",
         "trades_daily.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 AND resolution='1d' ORDER BY entry_at",
-        "polymarket_momentum.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 AND portfolio='polymarket_momentum' ORDER BY entry_at",
-        "machine_learning_long.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 AND portfolio='machine_learning' AND direction='long' ORDER BY entry_at",
-        "machine_learning_short.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 AND portfolio='machine_learning' AND direction='short' ORDER BY entry_at",
+        "polymarket_momentum.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 AND portfolio LIKE 'polymarket_momentum%' ORDER BY entry_at",
+        "machine_learning_long.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 AND portfolio LIKE 'machine_learning%' AND direction='long' ORDER BY entry_at",
+        "machine_learning_short.csv": f"SELECT * FROM {SCHEMA}.historical_trades WHERE run_id=$1 AND portfolio LIKE 'machine_learning%' AND direction='short' ORDER BY entry_at",
         "market_passes.csv": f"SELECT * FROM {SCHEMA}.historical_run_market_passes WHERE run_id=$1 ORDER BY above_at",
         "processed_markets.csv": f"SELECT * FROM {SCHEMA}.historical_run_markets WHERE run_id=$1 ORDER BY created_at, market_id",
         "market_filter_decisions.csv": f"""
@@ -247,6 +373,15 @@ async def generate_run_reports(
             JOIN {SCHEMA}.historical_asset_world_assets a ON a.world_id=w.world_id
             WHERE r.run_id=$1 ORDER BY w.as_of, w.market_id, w.pass_number, a.symbol
         """,
+        "asset_symbol_resolutions.csv": f"""
+            SELECT * FROM {SCHEMA}.historical_run_asset_resolutions
+            WHERE run_id=$1 ORDER BY original_symbol
+        """,
+        "rejected_asset_symbols.csv": f"""
+            SELECT * FROM {SCHEMA}.historical_run_asset_resolutions
+            WHERE run_id=$1 AND resolved_symbol IS NULL
+            ORDER BY original_symbol
+        """,
         "ml_observations.csv": f"SELECT * FROM {SCHEMA}.historical_ml_observations WHERE run_id=$1 ORDER BY first_pass_at",
         "ml_model_snapshots.csv": f"SELECT * FROM {SCHEMA}.historical_ml_model_snapshots WHERE run_id=$1 ORDER BY training_cutoff",
         "ml_predictions.csv": f"SELECT * FROM {SCHEMA}.historical_ml_predictions WHERE run_id=$1 ORDER BY created_at",
@@ -256,6 +391,25 @@ async def generate_run_reports(
             FROM {SCHEMA}.historical_backtest_stage_work
             WHERE run_id=$1 AND stage='simulation'
             ORDER BY work_key
+        """,
+        "momentum_parameter_results.csv": f"""
+            SELECT * FROM {SCHEMA}.historical_momentum_parameter_results
+            WHERE run_id=$1
+            ORDER BY trigger_at, market_id, pass_number, symbol,
+                     range_period, range_multiplier
+        """,
+        "momentum_parameter_performance.csv": f"""
+            SELECT resolution, range_period, range_multiplier,
+                   COUNT(*) AS signal_count,
+                   COUNT(*) FILTER (WHERE opened) AS opened_trade_count,
+                   SUM(COALESCE(net_profit, 0.0)) AS total_signal_net_profit,
+                   AVG(COALESCE(net_profit, 0.0)) AS average_signal_net_profit,
+                   AVG(net_profit) FILTER (WHERE opened) AS average_opened_trade_net_profit
+            FROM {SCHEMA}.historical_momentum_parameter_results
+            WHERE run_id=$1
+            GROUP BY resolution, range_period, range_multiplier
+            ORDER BY resolution, average_signal_net_profit DESC,
+                     range_period, range_multiplier
         """,
         "failures.csv": f"SELECT * FROM {SCHEMA}.historical_run_failures WHERE run_id=$1 ORDER BY failure_id",
     }
@@ -271,20 +425,65 @@ async def generate_run_reports(
     trades = outputs["trades.csv"]
     grouped: dict[str, list[float]] = defaultdict(list)
     for row in trades:
-        grouped[f"{row['portfolio']}:{row['resolution']}"].append(float(row["net_profit"] or 0.0))
+        grouped[f"{row['strategy_branch']}:{row['resolution']}"].append(
+            float(row["net_profit"] or 0.0)
+        )
+    overall_performance = _performance_summary(
+        [float(row["net_profit"] or 0.0) for row in trades]
+    )
+    portfolio_metrics, daily_rows = _daily_portfolio_metrics(trades)
+    _write_records_csv(report_dir / "daily_realized_portfolio.csv", daily_rows)
+    strategy_metrics: dict[str, Any] = {}
+    for branch in sorted({str(row["strategy_branch"]) for row in trades}):
+        branch_trades = [row for row in trades if row["strategy_branch"] == branch]
+        branch_portfolio, _ = _daily_portfolio_metrics(branch_trades)
+        strategy_metrics[branch] = {
+            "performance": _performance_summary(
+                [float(row["net_profit"] or 0.0) for row in branch_trades]
+            ),
+            "realized_portfolio": branch_portfolio,
+        }
     summary = {
         "run_id": str(run_id),
         "trade_count": len(trades),
+        "overall_performance": overall_performance,
+        "equal_notional_signal_portfolio": portfolio_metrics,
+        "equal_notional_executable_signal_portfolio": portfolio_metrics,
+        "strategies": strategy_metrics,
+        "strategy_resolutions": {
+            key: _performance_summary(values)
+            for key, values in grouped.items()
+        },
         "portfolios": {
-            key: {
-                "trade_count": len(values),
-                "total_net_profit": sum(values),
-                "profitable_trades": sum(value > 0 for value in values),
-                "unprofitable_trades": sum(value < 0 for value in values),
-            }
+            key: _performance_summary(values)
             for key, values in grouped.items()
         },
     }
+    performance_rows = await conn.fetch(
+        f"""
+        SELECT t.*,
+               COALESCE(o.event_archetype, 'not_ml_eligible') AS event_archetype,
+               EXTRACT(YEAR FROM t.entry_at)::INTEGER AS entry_year,
+               CASE WHEN COUNT(*) OVER (
+                   PARTITION BY t.market_id, t.pass_number, t.symbol, t.direction
+               ) > 1 THEN 'repeated_identical_signal' ELSE 'single_signal' END
+                   AS duplicate_status
+        FROM {SCHEMA}.historical_trades t
+        LEFT JOIN {SCHEMA}.historical_ml_observations o
+          ON o.run_id=t.run_id AND o.event_id=t.event_id AND o.symbol=t.symbol
+        WHERE t.run_id=$1
+        ORDER BY t.entry_at, t.trade_id
+        """,
+        run_id,
+    )
+    for key, filename in [
+        ("entry_year", "performance_by_year.csv"),
+        ("event_archetype", "performance_by_archetype.csv"),
+        ("symbol", "performance_by_ticker.csv"),
+        ("exit_reason", "performance_by_exit_reason.csv"),
+        ("duplicate_status", "performance_by_duplicate_status.csv"),
+    ]:
+        _write_records_csv(report_dir / filename, _group_performance(performance_rows, key))
     predictions = outputs["ml_predictions.csv"]
     classified = [row for row in predictions if row["classification_correct"] is not None]
     long_predictions = [row for row in classified if row["direction"] == "long"]
@@ -385,7 +584,7 @@ async def generate_run_reports(
                 total += value
                 cumulative.append(total)
             axis.plot(range(1, len(cumulative) + 1), cumulative, label=key)
-        axis.set_title("Cumulative net profit by portfolio and resolution")
+        axis.set_title("Cumulative net profit by executable strategy and resolution")
         axis.set_xlabel("Trade number")
         axis.set_ylabel("Net profit ($)")
         axis.grid(alpha=0.25)

@@ -25,6 +25,79 @@ SECTOR_ETFS = {
     "Utilities": "XLU",
 }
 
+ETF_BENCHMARKS = {
+    "BNO": "USO",
+    "DIA": "DIA",
+    "EEM": "EEM",
+    "EFA": "EFA",
+    "EIS": "EIS",
+    "EWJ": "EWJ",
+    "EWZ": "EWZ",
+    "FXI": "FXI",
+    "GLD": "GLD",
+    "HYG": "HYG",
+    "ICLN": "ICLN",
+    "IEF": "TLT",
+    "ISRA": "EIS",
+    "ITA": "XLI",
+    "IWM": "IWM",
+    "KRE": "KRE",
+    "OIH": "XLE",
+    "LQD": "LQD",
+    "QQQ": "QQQ",
+    "RWR": "VNQ",
+    "SLV": "SLV",
+    "SPY": "SPY",
+    "TBT": "TLT",
+    "TAN": "ICLN",
+    "TLT": "TLT",
+    "TNA": "IWM",
+    "TQQQ": "QQQ",
+    "USO": "USO",
+    "VIXY": "VIXY",
+    "VOO": "SPY",
+    "VTI": "VTI",
+    "VNQ": "XLRE",
+    "VWO": "VWO",
+    "XLB": "XLB",
+    "XAR": "ITA",
+    "XHB": "XHB",
+    "XLC": "XLC",
+    "XLE": "XLE",
+    "XLF": "XLF",
+    "XLI": "XLI",
+    "XLK": "XLK",
+    "XLP": "XLP",
+    "XLRE": "XLRE",
+    "XLU": "XLU",
+    "XLV": "XLV",
+    "XLY": "XLY",
+}
+
+
+def benchmark_symbol(
+    symbol: str,
+    *,
+    quote_type: str | None,
+    sector: str | None,
+) -> str | None:
+    if (quote_type or "").upper() == "ETF":
+        return ETF_BENCHMARKS.get(symbol.upper())
+    return SECTOR_ETFS.get(sector or "")
+
+
+def yahoo_request_bounds(start: datetime, end: datetime) -> tuple[datetime, datetime]:
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("Yahoo price request boundaries must be timezone-aware")
+    if start >= end:
+        raise ValueError("Yahoo price request start must be before end")
+
+    request_start = start.astimezone(timezone.utc).replace(microsecond=0)
+    request_end = end.astimezone(timezone.utc)
+    if request_end.microsecond:
+        request_end = (request_end + timedelta(seconds=1)).replace(microsecond=0)
+    return request_start, request_end
+
 
 def _download_prices(
     symbol: str,
@@ -34,15 +107,17 @@ def _download_prices(
 ) -> list[PriceBar]:
     import yfinance as yf
 
+    request_start, request_end = yahoo_request_bounds(start, end)
     frame = yf.download(
         symbol,
-        start=start.strftime("%Y-%m-%d"),
-        end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
+        start=request_start,
+        end=request_end,
         interval=resolution,
         auto_adjust=False,
         prepost=False,
         progress=False,
         threads=False,
+        ignore_tz=False,
     )
     if frame.empty:
         return []
@@ -88,12 +163,18 @@ def _download_metadata(symbol: str) -> dict[str, Any]:
     ticker = yf.Ticker(symbol)
     info = ticker.get_info()
     sector = info.get("sector")
+    quote_type = info.get("quoteType")
     return {
         "symbol": symbol.upper(),
         "asset_name": info.get("longName") or info.get("shortName"),
         "sector": sector,
         "sector_etf": SECTOR_ETFS.get(sector),
-        "quote_type": info.get("quoteType"),
+        "benchmark_symbol": benchmark_symbol(
+            symbol,
+            quote_type=quote_type,
+            sector=sector,
+        ),
+        "quote_type": quote_type,
         "exchange": info.get("exchange"),
     }
 

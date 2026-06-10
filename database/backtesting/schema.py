@@ -94,8 +94,34 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_probability_coverage (
     first_hour              TIMESTAMPTZ,
     last_hour               TIMESTAMPTZ,
     row_count               BIGINT NOT NULL,
+    volume_status           TEXT NOT NULL DEFAULT 'unknown',
+    volume_error            TEXT,
     completed_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE {SCHEMA}.historical_probability_coverage
+    ADD COLUMN IF NOT EXISTS volume_status TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE {SCHEMA}.historical_probability_coverage
+    ADD COLUMN IF NOT EXISTS volume_error TEXT;
+
+UPDATE {SCHEMA}.historical_probability_coverage AS coverage
+SET volume_status = inferred.volume_status
+FROM (
+    SELECT market_id,
+           CASE
+               WHEN COUNT(*) FILTER (WHERE volume_usdc IS NULL) = 0 THEN 'complete'
+               ELSE 'unavailable'
+           END AS volume_status
+    FROM {SCHEMA}.historical_probability_points
+    GROUP BY market_id
+) AS inferred
+WHERE coverage.market_id = inferred.market_id
+  AND coverage.volume_status = 'unknown';
+
+UPDATE {SCHEMA}.historical_probability_coverage
+SET volume_status = 'unavailable',
+    volume_error = COALESCE(volume_error, 'no stored probability points')
+WHERE volume_status = 'unknown' AND row_count = 0;
 
 CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_asset_worlds (
     world_id                UUID PRIMARY KEY,
@@ -120,6 +146,80 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_asset_world_assets (
     asset_class             TEXT NOT NULL,
     reason                  TEXT NOT NULL,
     PRIMARY KEY (world_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_asset_selection_experiments (
+    experiment_id           UUID PRIMARY KEY,
+    source_run_id           UUID NOT NULL REFERENCES {SCHEMA}.historical_backtest_runs(run_id),
+    status                  TEXT NOT NULL,
+    query_limit             INTEGER NOT NULL,
+    sample_seed             INTEGER NOT NULL,
+    model_name              TEXT NOT NULL,
+    catalog_hash            TEXT NOT NULL,
+    catalog_asset_count     INTEGER NOT NULL,
+    output_dir              TEXT NOT NULL,
+    started_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at             TIMESTAMPTZ,
+    error                   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_asset_selection_experiment_queries (
+    experiment_id           UUID NOT NULL REFERENCES {SCHEMA}.historical_asset_selection_experiments(experiment_id) ON DELETE CASCADE,
+    query_index             INTEGER NOT NULL,
+    market_id               TEXT NOT NULL,
+    event_id                TEXT NOT NULL,
+    pass_number             INTEGER NOT NULL,
+    as_of                   TIMESTAMPTZ NOT NULL,
+    event_title             TEXT NOT NULL,
+    question                TEXT NOT NULL,
+    tags                    JSONB NOT NULL DEFAULT '[]'::JSONB,
+    market_created_at       TIMESTAMPTZ NOT NULL,
+    market_end_at           TIMESTAMPTZ NOT NULL,
+    final_outcome           TEXT,
+    PRIMARY KEY (experiment_id, query_index),
+    UNIQUE (experiment_id, market_id, pass_number)
+);
+
+ALTER TABLE {SCHEMA}.historical_asset_selection_experiment_queries
+    ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::JSONB;
+
+CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_asset_selection_experiment_results (
+    experiment_id           UUID NOT NULL REFERENCES {SCHEMA}.historical_asset_selection_experiments(experiment_id) ON DELETE CASCADE,
+    query_index             INTEGER NOT NULL,
+    arm                     TEXT NOT NULL CHECK (arm IN ('discover_validate', 'catalog_retrieval')),
+    status                  TEXT NOT NULL,
+    duration_seconds        DOUBLE PRECISION NOT NULL,
+    candidate_count         INTEGER,
+    universe_name           TEXT,
+    universe_reason         TEXT,
+    method_input            JSONB NOT NULL DEFAULT '{{}}'::JSONB,
+    method_output           JSONB NOT NULL DEFAULT '{{}}'::JSONB,
+    error                   TEXT,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (experiment_id, query_index, arm),
+    FOREIGN KEY (experiment_id, query_index)
+        REFERENCES {SCHEMA}.historical_asset_selection_experiment_queries(experiment_id, query_index)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_asset_selection_experiment_assets (
+    experiment_id           UUID NOT NULL,
+    query_index             INTEGER NOT NULL,
+    arm                     TEXT NOT NULL,
+    symbol                  TEXT NOT NULL,
+    asset_name              TEXT NOT NULL,
+    asset_class             TEXT NOT NULL,
+    relationship_type       TEXT NOT NULL,
+    reason                  TEXT NOT NULL,
+    primary_exchange        TEXT,
+    stock_type              TEXT,
+    industry                TEXT,
+    category                TEXT,
+    subcategory             TEXT,
+    PRIMARY KEY (experiment_id, query_index, arm, symbol),
+    FOREIGN KEY (experiment_id, query_index, arm)
+        REFERENCES {SCHEMA}.historical_asset_selection_experiment_results(experiment_id, query_index, arm)
+        ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_articles (
@@ -206,18 +306,60 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_price_download_windows (
     first_ts                TIMESTAMPTZ,
     last_ts                 TIMESTAMPTZ,
     row_count               BIGINT NOT NULL,
+    status                  TEXT NOT NULL DEFAULT 'complete',
+    error                   TEXT,
     completed_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (symbol, resolution, requested_start, requested_end)
 );
+
+ALTER TABLE {SCHEMA}.historical_price_download_windows
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'complete';
+ALTER TABLE {SCHEMA}.historical_price_download_windows
+    ADD COLUMN IF NOT EXISTS error TEXT;
+
+UPDATE {SCHEMA}.historical_price_download_windows
+SET status = 'no_data'
+WHERE status = 'complete' AND row_count = 0;
 
 CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_asset_metadata (
     symbol                  TEXT PRIMARY KEY,
     asset_name              TEXT,
     sector                  TEXT,
     sector_etf              TEXT,
+    benchmark_symbol        TEXT,
     metadata                JSONB NOT NULL,
     missing_reason          TEXT,
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE {SCHEMA}.historical_asset_metadata
+    ADD COLUMN IF NOT EXISTS benchmark_symbol TEXT;
+
+CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_us_security_master (
+    official_symbol         TEXT PRIMARY KEY,
+    yfinance_symbol         TEXT NOT NULL,
+    security_name           TEXT NOT NULL,
+    exchange                TEXT NOT NULL,
+    is_etf                  BOOLEAN NOT NULL,
+    source                  TEXT NOT NULL,
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_us_security_master_yfinance_symbol
+    ON {SCHEMA}.historical_us_security_master(yfinance_symbol);
+
+CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_run_asset_resolutions (
+    run_id                  UUID NOT NULL REFERENCES {SCHEMA}.historical_backtest_runs(run_id) ON DELETE CASCADE,
+    original_symbol         TEXT NOT NULL,
+    resolved_symbol         TEXT,
+    official_symbol         TEXT,
+    security_name           TEXT,
+    exchange                TEXT,
+    is_etf                  BOOLEAN,
+    match_method            TEXT,
+    rejection_reason        TEXT,
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (run_id, original_symbol)
 );
 
 CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_ml_observations (
@@ -380,6 +522,9 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_ml_predictions (
 ALTER TABLE {SCHEMA}.historical_ml_predictions
     ADD COLUMN IF NOT EXISTS directions_agree BOOLEAN NOT NULL DEFAULT FALSE;
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_historical_ml_predictions_candidate
+    ON {SCHEMA}.historical_ml_predictions(run_id, market_id, pass_number, symbol);
+
 CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_trades (
     trade_id                UUID PRIMARY KEY,
     run_id                  UUID NOT NULL REFERENCES {SCHEMA}.historical_backtest_runs(run_id) ON DELETE CASCADE,
@@ -408,6 +553,9 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_trades (
     minimum_price           DOUBLE PRECISION,
     final_outcome           TEXT,
     predicted_target_price  DOUBLE PRECISION,
+    range_period            INTEGER,
+    range_multiplier        DOUBLE PRECISION,
+    parameter_selection     JSONB NOT NULL DEFAULT '{{}}'::JSONB,
     gross_profit            DOUBLE PRECISION,
     net_profit              DOUBLE PRECISION,
     maximum_profit          DOUBLE PRECISION,
@@ -417,6 +565,37 @@ CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_trades (
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (run_id, portfolio, market_id, pass_number, symbol)
 );
+
+ALTER TABLE {SCHEMA}.historical_trades
+    ADD COLUMN IF NOT EXISTS range_period INTEGER;
+ALTER TABLE {SCHEMA}.historical_trades
+    ADD COLUMN IF NOT EXISTS range_multiplier DOUBLE PRECISION;
+ALTER TABLE {SCHEMA}.historical_trades
+    ADD COLUMN IF NOT EXISTS parameter_selection JSONB NOT NULL DEFAULT '{{}}'::JSONB;
+
+CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_momentum_parameter_results (
+    run_id                  UUID NOT NULL REFERENCES {SCHEMA}.historical_backtest_runs(run_id) ON DELETE CASCADE,
+    market_id               TEXT NOT NULL,
+    event_id                TEXT NOT NULL,
+    pass_number             INTEGER NOT NULL,
+    symbol                  TEXT NOT NULL,
+    trigger_at              TIMESTAMPTZ NOT NULL,
+    resolution              TEXT NOT NULL CHECK (resolution IN ('1h', '1d')),
+    range_period            INTEGER NOT NULL,
+    range_multiplier        DOUBLE PRECISION NOT NULL,
+    opened                  BOOLEAN NOT NULL,
+    reason                  TEXT NOT NULL,
+    net_profit              DOUBLE PRECISION,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (
+        run_id, market_id, pass_number, symbol, range_period, range_multiplier
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_momentum_parameter_walk_forward
+    ON {SCHEMA}.historical_momentum_parameter_results(
+        run_id, resolution, trigger_at, range_period, range_multiplier
+    );
 
 CREATE TABLE IF NOT EXISTS {SCHEMA}.historical_run_failures (
     failure_id              BIGSERIAL PRIMARY KEY,
