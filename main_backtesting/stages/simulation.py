@@ -25,6 +25,12 @@ from strategies.event_driven_long import EventDrivenStrategy, rate_of_change
 from strategies.event_driven_ml import DAILY_SESSION_LENGTH, evaluate_prediction, predict, train_snapshot
 
 from main_backtesting.stages.event_filter import accepted_markets, run_events
+from main_backtesting.stages.simulation_portfolio import (
+    assemble_candidate,
+    load_pass1_candidates_from_work,
+    run_portfolio_pass2,
+)
+from portfolio.serialization import candidate_to_dict
 
 
 def polymarket_volume_quality(
@@ -80,7 +86,7 @@ def polymarket_volume_quality(
         reason = "polymarket_volume_quality_confirmed"
         allowed = True
     return {
-        "gate_applied": False,
+        "gate_applied": True,
         "allowed": allowed,
         "reason": reason,
         "pre_entry_volume_usdc": total,
@@ -361,6 +367,15 @@ async def run(self, conn: Any) -> None:
             snapshot.snapshot_id = await save_model_snapshot(conn, snapshot)
         opened = 0
         entry_decisions: list[dict[str, Any]] = []
+        pass1_candidates: list[dict[str, Any]] = []
+        portfolio_mode = self.config.portfolio_enabled
+        daily_bars_for_adv = await price_bars(
+            conn,
+            symbol=asset.symbol,
+            resolution="1d",
+            start=row["as_of"] - timedelta(days=60),
+            end=graph_end,
+        )
         if snapshot is not None and snapshot.status == "trained":
             entry_bar = next_bar_after(bars, row["as_of"])
             event_open_price = observation.research_data.get("event_open_price")
@@ -432,8 +447,33 @@ async def run(self, conn: Any) -> None:
                     decision["polymarket_volume_statistics"] = volume_quality
                     entry_decisions.append(decision)
                     if trade:
-                        await save_trade(conn, trade)
-                        opened += 1
+                        if portfolio_mode:
+                            candidate = await assemble_candidate(
+                                self,
+                                conn,
+                                trade=trade,
+                                market=market,
+                                event=event,
+                                bars=bars,
+                                daily_bars=daily_bars_for_adv,
+                                bar_window_start=bar_start,
+                                bar_window_end=graph_end,
+                                polymarket_volume_quality=volume_quality,
+                                consumes_capital=True,
+                                observation_archetype=observation.event_archetype,
+                                classification_probability=prediction.classification_probability,
+                                predicted_peak_percent=prediction.predicted_peak_percent,
+                                remaining_gap=prediction.remaining_gap,
+                                directions_agree=prediction.directions_agree,
+                                probability_at_entry=decision.get("probability_at_entry"),
+                            )
+                            if candidate:
+                                pass1_candidates.append(candidate_to_dict(candidate))
+                                decision["candidate_id"] = candidate.candidate_id
+                                decision["opened"] = False
+                        else:
+                            await save_trade(conn, trade)
+                            opened += 1
                 else:
                     entry_decisions.append(
                         {
@@ -588,17 +628,41 @@ async def run(self, conn: Any) -> None:
             )
             entry_decisions.append(selected_decision)
             if selected_trade:
-                selected_trade.graph_path = str(
-                    create_trade_graph(
-                        selected_trade,
-                        bars=available_bars,
-                        probabilities=probabilities,
-                        simulation_end=self.config.end,
-                        graph_dir=self.run_dir / "graphs" / "trades",
+                if portfolio_mode:
+                    candidate = await assemble_candidate(
+                        self,
+                        conn,
+                        trade=selected_trade,
+                        market=market,
+                        event=event,
+                        bars=bars,
+                        daily_bars=daily_bars_for_adv,
+                        bar_window_start=bar_start,
+                        bar_window_end=graph_end,
+                        polymarket_volume_quality=volume_quality,
+                        consumes_capital=True,
+                        observation_archetype=(
+                            observation.event_archetype if observation else None
+                        ),
+                        price_momentum=selected_decision.get("price_momentum"),
+                        probability_at_entry=selected_decision.get("probability_at_entry"),
                     )
-                )
-                await save_trade(conn, selected_trade)
-                opened += 1
+                    if candidate:
+                        pass1_candidates.append(candidate_to_dict(candidate))
+                        selected_decision["candidate_id"] = candidate.candidate_id
+                        selected_decision["opened"] = False
+                else:
+                    selected_trade.graph_path = str(
+                        create_trade_graph(
+                            selected_trade,
+                            bars=available_bars,
+                            probabilities=probabilities,
+                            simulation_end=self.config.end,
+                            graph_dir=self.run_dir / "graphs" / "trades",
+                        )
+                    )
+                    await save_trade(conn, selected_trade)
+                    opened += 1
         else:
             entry_decisions.append(
                 {
@@ -613,8 +677,13 @@ async def run(self, conn: Any) -> None:
             stage="simulation",
             work_key=work_key,
             result={
+                "schema_version": 1,
                 "model_status": snapshot.status if snapshot else "not_ml_eligible",
                 "trades_opened": opened,
+                "pass1_candidates": pass1_candidates,
                 "entry_decisions": entry_decisions,
             },
         )
+    if self.config.portfolio_enabled:
+        candidates = await load_pass1_candidates_from_work(conn, run_id=self.run_id)
+        await run_portfolio_pass2(self, conn, candidates)

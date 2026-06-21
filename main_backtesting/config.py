@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from portfolio.config import PortfolioConfig
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -110,6 +112,8 @@ class BacktestConfig:
             }
         )
     )
+    portfolio_enabled: bool = False
+    portfolio_config: PortfolioConfig = field(default_factory=PortfolioConfig)
 
     def run_dir(self, run_id: object) -> Path:
         return self.output_root / str(run_id)
@@ -125,6 +129,8 @@ class BacktestConfig:
                 values[key] = value.total_seconds()
             elif isinstance(value, datetime):
                 values[key] = value.isoformat()
+            elif isinstance(value, PortfolioConfig):
+                values[key] = value.to_json()
         return values
 
     @classmethod
@@ -147,6 +153,11 @@ class BacktestConfig:
         parsed["trailing_range_multiplier_grid"] = tuple(
             parsed.get("trailing_range_multiplier_grid", (1.5, 2.0, 2.5, 3.0))
         )
+        if "portfolio_config" in parsed:
+            parsed["portfolio_config"] = PortfolioConfig.from_json(parsed["portfolio_config"])
+        else:
+            parsed["portfolio_config"] = PortfolioConfig()
+        parsed.setdefault("portfolio_enabled", False)
         return cls(**parsed)
 
 
