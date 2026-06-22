@@ -46,6 +46,10 @@ class PortfolioConfig:
     paper_trade_enabled: bool = False
     on_missing_liquidity: Literal["skip_warn", "paper_trade", "reject"] = "skip_warn"
     on_missing_volume: Literal["skip_warn", "paper_trade", "reject"] = "skip_warn"
+    # Milestone 2 control: when False (default) a present-but-failing Polymarket
+    # volume quality is logged but does NOT reject the trade. Enable in M2 to turn
+    # the gate into a hard reject.
+    enforce_polymarket_volume_gate: bool = False
     short_route: Literal["reject", "paper"] = "reject"
     slippage_bps: float = 0.0
     geo_country_tags: frozenset[str] = DEFAULT_GEO_COUNTRY_TAGS
@@ -56,7 +60,11 @@ class PortfolioConfig:
         return replace(
             self,
             starting_capital=1e12,
-            risk_per_trade_pct=1.0,
+            # Keep the normal per-trade risk fraction: forcing 1.0 made every
+            # candidate's risk-target notional exceed even 1e12 capital, so the
+            # passthrough profile rejected concurrent trades for insufficient
+            # cash. With caps disabled the cash gate is off (see Portfolio), so a
+            # modest risk fraction lets every candidate pass through.
             max_position_notional_pct=1.0,
             max_event_exposure_pct=1.0,
             max_sector_exposure_pct=1.0,

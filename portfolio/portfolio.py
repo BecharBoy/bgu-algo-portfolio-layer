@@ -50,7 +50,10 @@ class Portfolio:
             bars_by_key=self.bars_by_key,
             kill_switch_drawdown_pct=self.config.kill_switch_drawdown_pct,
         )
-        self.state.validate_invariants()
+        # When caps are disabled (passthrough / unlimited-capital mode) the cash
+        # gate is intentionally off, so negative cash is expected rather than a
+        # bug. NaN detection stays always-on regardless.
+        self.state.validate_invariants(allow_negative_cash=not self.config.caps_enabled)
 
     def evaluate(
         self,
@@ -121,7 +124,15 @@ class Portfolio:
                 active_caps=tuple(active_caps),
             )
 
-        volume_reason = volume_gate_reject(normalized)
+        # Polymarket volume-gate ENFORCEMENT is a Milestone 2 control: off by
+        # default in the Option 2 Core so a present-but-failing volume quality
+        # does not reject otherwise-valid trades. The quality dict is still
+        # carried on the candidate and logged regardless; only the reject is gated.
+        volume_reason = (
+            volume_gate_reject(normalized)
+            if self.config.enforce_polymarket_volume_gate
+            else None
+        )
         if volume_reason:
             if (
                 not normalized.skip_volume_gate
@@ -186,7 +197,7 @@ class Portfolio:
                 requested_risk_dollars=requested_risk_dollars,
                 effective_pct=effective_pct,
             )
-        if required_cash > self.state.cash:
+        if self.config.caps_enabled and required_cash > self.state.cash:
             return self._reject(
                 candidate,
                 evaluated_at=evaluated_at,
@@ -271,9 +282,13 @@ class Portfolio:
 
     def close(self, candidate: TradeCandidate) -> None:
         key = f"{candidate.event_id}:{candidate.symbol}"
-        position = self.state.open_positions.pop(key, None)
-        if position is None:
+        position = self.state.open_positions.get(key)
+        # Only close the position THIS candidate booked. A non-booked candidate
+        # (e.g. a duplicate (event,symbol) rejected at entry) still emits an exit
+        # event; without this identity check it would close the original holding.
+        if position is None or position.candidate_id != candidate.candidate_id:
             return
+        del self.state.open_positions[key]
         multiplier = 1.0 if position.direction == "long" else -1.0
         gross = (candidate.exit_price - position.entry_price) * position.quantity * multiplier
         exit_commission = ib_style_commission(position.quantity, position.quantity * candidate.exit_price)

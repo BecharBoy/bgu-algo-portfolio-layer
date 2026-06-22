@@ -4,6 +4,7 @@ import csv
 import json
 from pathlib import Path
 
+from portfolio.attribution import compute_trade_alpha_rows
 from portfolio.models import PortfolioDecision
 from portfolio.portfolio import Portfolio
 

@@ -136,7 +136,7 @@ class PortfolioState:
             kill_switch_active=False,
         )
 
-    def validate_invariants(self) -> None:
+    def validate_invariants(self, *, allow_negative_cash: bool = False) -> None:
         import math
 
         if any(
@@ -144,7 +144,7 @@ class PortfolioState:
             for value in (self.cash, self.equity, self.gross_exposure, self.heat)
         ):
             raise RuntimeError("PortfolioState invariant violation: NaN accounting value")
-        if self.cash < 0 and self.open_positions:
+        if not allow_negative_cash and self.cash < 0 and self.open_positions:
             raise RuntimeError("PortfolioState invariant violation: negative cash with open positions")
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable
 
@@ -10,13 +10,17 @@ from portfolio.portfolio import Portfolio
 
 @dataclass(frozen=True, order=True)
 class TimelineEvent:
-    sort_rank: int
+    # Ordering key (spec §11.2): timestamp first, then exits-before-entries
+    # WITHIN that timestamp (sort_rank 0=exit, 1=entry), then the deterministic
+    # tie-break entry_at, market_id, symbol. `kind`/`candidate` are excluded from
+    # comparison so equal-key events never attempt to compare TradeCandidate.
     timestamp: datetime
+    sort_rank: int
     entry_at: datetime
     market_id: str
     symbol: str
-    kind: str
-    candidate: TradeCandidate
+    kind: str = field(compare=False)
+    candidate: TradeCandidate = field(compare=False)
 
 
 def build_timeline(candidates: Iterable[TradeCandidate]) -> list[TimelineEvent]:

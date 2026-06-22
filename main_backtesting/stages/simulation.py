@@ -40,6 +40,7 @@ def polymarket_volume_quality(
     minimum_pre_entry_usdc: float,
     concentration_minimum_usdc: float,
     max_single_hour_share: float,
+    gate_applied: bool = False,
 ) -> dict[str, Any]:
     completed_volumes = [
         max(float(point.volume_usdc or 0.0), 0.0)
@@ -86,7 +87,7 @@ def polymarket_volume_quality(
         reason = "polymarket_volume_quality_confirmed"
         allowed = True
     return {
-        "gate_applied": True,
+        "gate_applied": gate_applied,
         "allowed": allowed,
         "reason": reason,
         "pre_entry_volume_usdc": total,
@@ -344,6 +345,10 @@ async def run(self, conn: Any) -> None:
             minimum_pre_entry_usdc=self.config.polymarket_volume_minimum_pre_entry_usdc,
             concentration_minimum_usdc=self.config.polymarket_volume_concentration_minimum_usdc,
             max_single_hour_share=self.config.polymarket_volume_max_single_hour_share,
+            # Legacy parity (spec §6): pre-portfolio behavior is gate_applied=False
+            # (diagnostic only). Only the portfolio path marks the gate applied,
+            # keeping legacy-mode entry-decision diagnostics byte-identical.
+            gate_applied=self.config.portfolio_enabled,
         )
         observation = observations.get((market.event_id, asset.symbol))
         snapshot = None
